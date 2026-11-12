@@ -6,6 +6,16 @@ import OpenAI from 'openai'
 import { toResponses, toChat, toChatStream } from './protocol.mjs'
 
 const config = JSON.parse(readFileSync(new URL('./adapter-config.json', import.meta.url), 'utf8'))
+const port = config.port === undefined ? 4140 : config.port
+const bridgePort = config.bridgePort === undefined ? 4141 : config.bridgePort
+for (const [name, value] of Object.entries({ port, bridgePort })) {
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error(`Set ${name} to an integer between 1 and 65535 in adapter-config.json`)
+  }
+}
+if (port === bridgePort) {
+  throw new Error('port and bridgePort must be different in adapter-config.json')
+}
 if (typeof config.apiKey !== 'string' || !config.apiKey.trim()) {
   throw new Error('Set a non-empty local apiKey in adapter-config.json; see README.md')
 }
@@ -15,7 +25,7 @@ if (!Array.isArray(config.models) || config.models.length === 0
 }
 const upstream = new OpenAI({
   apiKey: 'unused-local-bridge',
-  baseURL: 'http://127.0.0.1:4141/v1',
+  baseURL: `http://127.0.0.1:${bridgePort}/v1`,
   maxRetries: 0,
   timeout: 300000,
 })
@@ -108,6 +118,6 @@ const server = createServer(async (request, response) => {
   }
 })
 
-server.listen(4140, '127.0.0.1', () => {
-  console.log(`Copilot WorkBuddy adapter: http://127.0.0.1:4140 (${models.size} official models)`)
+server.listen(port, '127.0.0.1', () => {
+  console.log(`Copilot WorkBuddy adapter: http://127.0.0.1:${port} (${models.size} official models)`)
 })

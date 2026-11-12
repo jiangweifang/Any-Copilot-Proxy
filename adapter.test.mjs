@@ -2,15 +2,22 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { createServer } from 'node:http'
+import { once } from 'node:events'
+
+function configFixture(config) {
+  const directory = mkdtempSync(join(import.meta.dirname, '.adapter-test-'))
+  for (const file of ['adapter.mjs', 'protocol.mjs', 'start.ps1']) {
+    copyFileSync(join(import.meta.dirname, file), join(directory, file))
+  }
+  writeFileSync(join(directory, 'adapter-config.json'), JSON.stringify(config))
+  return directory
+}
 
 function startWithConfig(config) {
-  const directory = mkdtempSync(join(import.meta.dirname, '.adapter-test-'))
+  const directory = configFixture(config)
   try {
-    for (const file of ['adapter.mjs', 'protocol.mjs']) {
-      copyFileSync(join(import.meta.dirname, file), join(directory, file))
-    }
-    writeFileSync(join(directory, 'adapter-config.json'), JSON.stringify(config))
     return spawnSync(process.execPath, [join(directory, 'adapter.mjs')], {
       encoding: 'utf8',
       timeout: 10000,
@@ -35,5 +42,144 @@ test('refuses to start with a missing, empty or malformed model catalog', () => 
     assert.ifError(result.error)
     assert.equal(result.status, 1)
     assert.match(result.stderr, /Populate models/)
+  }
+})
+
+test('refuses invalid or conflicting adapter and bridge ports', () => {
+  const config = { apiKey: 'test-only-not-a-real-key', models: [{ id: 'test-model' }] }
+  for (const name of ['port', 'bridgePort']) {
+    for (const value of [null, 0, -1, 65536, 4140.5, '4140']) {
+      const result = startWithConfig({ ...config, [name]: value })
+      assert.ifError(result.error)
+      assert.equal(result.status, 1)
+      assert.match(result.stderr, new RegExp(`Set ${name} to an integer`))
+    }
+  }
+  for (const ports of [{ port: 4240, bridgePort: 4240 }, { port: 4141 }, { bridgePort: 4140 }]) {
+    const result = startWithConfig({ ...config, ...ports })
+    assert.ifError(result.error)
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /port and bridgePort must be different/)
+  }
+})
+
+async function closeServer(server) {
+  if (server.listening) {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  }
+}
+
+test('uses configured ports for authenticated client requests and upstream routing', { timeout: 15000 }, async t => {
+  const requests = []
+  const bridge = createServer(async (request, response) => {
+    let body = ''
+    for await (const part of request) body += part
+    requests.push({ url: request.url, body: JSON.parse(body) })
+    response.writeHead(200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify({
+      id: 'test-completion',
+      object: 'chat.completion',
+      model: 'test-model',
+      choices: [{ index: 0, message: { role: 'assistant', content: 'Test reply' }, finish_reason: 'stop' }],
+    }))
+  })
+  t.after(() => closeServer(bridge))
+  bridge.listen(0, '127.0.0.1')
+  await once(bridge, 'listening')
+  const reservation = createServer()
+  t.after(() => closeServer(reservation))
+  reservation.listen(0, '127.0.0.1')
+  await once(reservation, 'listening')
+  const port = reservation.address().port
+  const directory = configFixture({
+    port,
+    bridgePort: bridge.address().port,
+    apiKey: 'test-only-not-a-real-key',
+    models: [{ id: 'test-model' }],
+  })
+  await closeServer(reservation)
+  let child
+  t.after(async () => {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, 'exit')
+      child.kill()
+      await exited
+    }
+    rmSync(directory, { recursive: true, force: true })
+  })
+  child = spawn(process.execPath, [join(directory, 'adapter.mjs')], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let stderr = ''
+  child.stderr.on('data', chunk => { stderr += chunk })
+  await new Promise((resolve, reject) => {
+    child.once('error', reject)
+    child.once('exit', code => reject(new Error(`Adapter exited (${code}): ${stderr}`)))
+    child.stdout.on('data', chunk => {
+      if (chunk.toString().includes(`http://127.0.0.1:${port}`)) resolve()
+    })
+  })
+  const baseURL = `http://127.0.0.1:${port}/v1`
+  const headers = { Authorization: 'Bearer test-only-not-a-real-key' }
+  const unauthorized = await fetch(`${baseURL}/models`)
+  assert.equal(unauthorized.status, 401)
+  const models = await fetch(`${baseURL}/models`, { headers })
+  assert.equal(models.status, 200)
+  assert.equal((await models.json()).data[0].id, 'test-model')
+  const payload = { model: 'test-model', messages: [{ role: 'user', content: 'Hello' }] }
+  const completion = await fetch(`${baseURL}/chat/completions`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  assert.equal(completion.status, 200)
+  assert.equal((await completion.json()).choices[0].message.content, 'Test reply')
+  assert.deepEqual(requests, [{ url: '/v1/chat/completions', body: payload }])
+})
+
+test('Windows launcher validates ports, uses configured values and preserves legacy defaults', { skip: process.platform !== 'win32' }, () => {
+  for (const [ports, error] of [
+    [{}, null],
+    [{ port: 4240, bridgePort: 4241 }, null],
+    [{ port: 0 }, /Set port to an integer/],
+    [{ bridgePort: '4141' }, /Set bridgePort to an integer/],
+    [{ port: 4240, bridgePort: 4240 }, /port and bridgePort must be different/],
+  ]) {
+    const directory = configFixture(ports)
+    try {
+      const script = `
+        function Get-NetTCPConnection {
+          [CmdletBinding()]
+          param($State, $LocalPort)
+          Write-Host "CHECK_PORT $LocalPort"
+        }
+        function Start-Process {
+          param($FilePath, $ArgumentList, $WorkingDirectory, [switch]$NoNewWindow,
+            [switch]$PassThru, $RedirectStandardOutput, $RedirectStandardError)
+          Write-Host ("START_ARGS " + ($ArgumentList -join ' '))
+          [PSCustomObject]@{ HasExited = $true; Id = 0 }
+        }
+        try { & '${join(directory, 'start.ps1').replaceAll("'", "''")}' }
+        catch {
+          if ($_.Exception.Message -notlike 'Copilot service stopped unexpectedly*') { throw }
+        }
+        exit 0
+      `
+      const result = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+        encoding: 'utf8',
+        timeout: 10000,
+      })
+      assert.ifError(result.error)
+      if (error) {
+        assert.equal(result.status, 1)
+        assert.match(result.stderr, error)
+        assert.doesNotMatch(result.stdout, /START_ARGS/)
+        continue
+      }
+      assert.equal(result.status, 0, result.stderr || result.stdout)
+      assert.match(result.stdout, new RegExp(`CHECK_PORT ${ports.port ?? 4140}\\b`))
+      assert.match(result.stdout, new RegExp(`CHECK_PORT ${ports.bridgePort ?? 4141}\\b`))
+      assert.match(result.stdout, new RegExp(`--port ${ports.bridgePort ?? 4141}\\b`))
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   }
 })

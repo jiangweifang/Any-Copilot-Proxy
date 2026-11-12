@@ -1,4 +1,6 @@
 {
+  "port": 4140,
+  "bridgePort": 4141,
   "apiKey": "",
   "models": []
 }

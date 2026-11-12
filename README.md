@@ -27,12 +27,14 @@ flowchart TD
     bridge --> copilot
 ```
 
+图中为默认端口；可通过本机 `adapter-config.json` 中的 `port` 和 `bridgePort` 修改。
+
 ## 环境要求
 
 - Windows 10/11、Windows PowerShell 5.1。
 - Node.js 22 或更高版本、npm、Git。
 - 有效的 GitHub Copilot 订阅，以及可以访问 GitHub / Copilot 服务的网络。
-- 本机 `4140`、`4141` 端口未被其他程序占用。
+- 本机配置的两个端口未被其他程序占用（默认 `4140`、`4141`）。
 
 以下命令在 PowerShell 中执行。启动脚本目前面向 Windows；其他平台需要自行管理两个 Node.js 进程。
 
@@ -90,6 +92,38 @@ Write-Host 'Local configuration created. Keep adapter-config.json private.'
 
 `apiKey` 是客户端访问 **4140 端口**所需的随机本地口令，**不是 GitHub Token**。`models` 使用你账号返回的 `data` 数组，不要从其他账号复制模型清单。
 
+#### 本地配置说明与模型示例
+
+端口、本地 Key 和模型目录统一保存在 `adapter-config.json`。完整结构示例如下（Key 和模型 ID 均为占位值，不可直接用于请求）：
+
+```json
+{
+  "port": 4140,
+  "bridgePort": 4141,
+  "apiKey": "REPLACE_WITH_YOUR_GENERATED_LOCAL_KEY",
+  "models": [
+    {
+      "id": "YOUR_CHAT_MODEL_ID"
+    },
+    {
+      "id": "YOUR_RESPONSES_MODEL_ID",
+      "supported_endpoints": ["/responses"]
+    }
+  ]
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `port` | 客户端访问适配器的端口，默认 `4140`；该端口校验 `apiKey`。 |
+| `bridgePort` | 适配器访问本机桥接服务的端口，默认 `4141`；桥接服务本身不校验本地 Key。 |
+| `apiKey` | 上述步骤生成的随机本地 Key，填入客户端的 API Key 设置。 |
+| `models` | 允许使用的模型数组；每项的 `id` 必须替换为账号 `/v1/models` 返回的真实 ID，不支持通配符。 |
+
+普通 Chat Completions 模型只需填写 `id`；Responses 模型还需填写 `supported_endpoints`，见下文。账号目录返回的其他模型字段可以保留。
+
+两个端口必须是 `1` 至 `65535` 的整数，且不能相同。旧配置未填写端口时仍使用默认值；监听地址保持 `127.0.0.1`。例如将 `port` 改为 `4240`、`bridgePort` 改为 `4241` 后，`npm start` 会同步启动对应端口，适配器也会自动连接新的桥接端口。客户端 Base URL 则需改为 `http://127.0.0.1:4240/v1`。首次配置时，临时桥接命令的 `--port` 和读取目录的 URL 也需使用对应的桥接端口。
+
 **重要：配置 Responses 模型的路由。** `copilot-bridge` 2.1.0 的模型列表不返回原始 `supported_endpoints`，因此上述步骤只能发现模型 ID，不能自动判断调用协议。没有该字段的模型默认走 Chat Completions。对于需要 Responses API 的模型，请根据该模型的接口要求，在本地配置的对应模型对象中补充：
 
 ```json
@@ -99,7 +133,7 @@ Write-Host 'Local configuration created. Keep adapter-config.json private.'
 }
 ```
 
-将 `YOUR_RESPONSES_MODEL_ID` 换成列表中的真实 ID；这是配置片段，不要覆盖外层的 `apiKey` 和 `models`。模型支持两种接口时，配置包含 `/responses` 就优先走 Responses。不要给所有模型统一设置此字段，也不要仅凭模型名字猜测接口。若无法确认，先选用账号中明确支持 Chat Completions 的模型；上游提示仅支持 Responses 时，再为该模型设置该字段。
+将 `YOUR_RESPONSES_MODEL_ID` 换成列表中的真实 ID；这是配置片段，不要覆盖外层的端口、`apiKey` 和 `models`。模型支持两种接口时，配置包含 `/responses` 就优先走 Responses。不要给所有模型统一设置此字段，也不要仅凭模型名字猜测接口。若无法确认，先选用账号中明确支持 Chat Completions 的模型；上游提示仅支持 Responses 时，再为该模型设置该字段。
 
 回到**终端 A**，按 `Ctrl+C` 停止临时桥接服务，然后继续下一步。
 
@@ -120,11 +154,11 @@ npm start
 | 配置项 | 值 |
 | --- | --- |
 | 接口类型 | OpenAI / Chat Completions |
-| Base URL | `http://127.0.0.1:4140/v1` |
+| Base URL | `http://127.0.0.1:<port>/v1`，默认 `http://127.0.0.1:4140/v1` |
 | API Key | 本机 `adapter-config.json` 中的 `apiKey` |
 | 模型 ID | `/v1/models` 返回的一个确切 ID |
 
-不要把 Base URL 指向 `4141`，否则会绕过本项目的本地 Key 校验及适配层。不要把本地 Key 填成 GitHub Token。复制 Key 时注意剪贴板、录屏及截图安全。
+不要把 Base URL 指向桥接端口（`bridgePort`，默认 `4141`），否则会绕过本项目的本地 Key 校验及适配层。不要把本地 Key 填成 GitHub Token。复制 Key 时注意剪贴板、录屏及截图安全。
 
 ## 验证接口
 
@@ -132,8 +166,10 @@ npm start
 
 ```powershell
 $config = Get-Content -LiteralPath .\adapter-config.json -Raw | ConvertFrom-Json
+$adapterPort = if ($config.PSObject.Properties.Name -contains 'port') { $config.port } else { 4140 }
+$baseUrl = "http://127.0.0.1:$adapterPort/v1"
 $headers = @{ Authorization = "Bearer $($config.apiKey)" }
-$models = Invoke-RestMethod -Uri 'http://127.0.0.1:4140/v1/models' -Headers $headers
+$models = Invoke-RestMethod -Uri "$baseUrl/models" -Headers $headers
 $models.data | Select-Object id
 
 # Enter an available chat model from the list; this request consumes account quota.
@@ -143,7 +179,7 @@ $body = @{
     messages = @(@{ role = 'user'; content = 'Hello' })
     stream = $false
 } | ConvertTo-Json -Depth 10
-Invoke-RestMethod -Uri 'http://127.0.0.1:4140/v1/chat/completions' `
+Invoke-RestMethod -Uri "$baseUrl/chat/completions" `
     -Method Post -Headers $headers -ContentType 'application/json' -Body $body -TimeoutSec 300
 ```
 
@@ -155,9 +191,10 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:4140/v1/chat/completions' `
 
 ```powershell
 $ErrorActionPreference = 'Stop'
-$catalog = Invoke-RestMethod -Uri 'http://127.0.0.1:4141/v1/models' -TimeoutSec 30
-if (@($catalog.data).Count -eq 0) { throw 'The upstream model catalog is empty.' }
 $config = Get-Content -LiteralPath .\adapter-config.json -Raw | ConvertFrom-Json
+$bridgePort = if ($config.PSObject.Properties.Name -contains 'bridgePort') { $config.bridgePort } else { 4141 }
+$catalog = Invoke-RestMethod -Uri "http://127.0.0.1:$bridgePort/v1/models" -TimeoutSec 30
+if (@($catalog.data).Count -eq 0) { throw 'The upstream model catalog is empty.' }
 $routes = @{}
 foreach ($model in $config.models) {
     if ($model.supported_endpoints) {
@@ -180,7 +217,7 @@ $path = Join-Path (Get-Location).Path 'adapter-config.json'
 
 - 仓库不包含真实密钥、登录缓存、私有模型清单、本机配置或运行日志。`.gitignore` 防止这些常见文件被误提交，但不能替代提交前检查；不要使用 `git add -f` 添加敏感文件。
 - `adapter-config.json` 以明文保存本地 Key，请限制该文件的访问权限；怀疑泄露时重新生成 Key 并更新客户端配置。
-- **不要把两个端口映射到公网或共享网络。** `copilot-bridge` 的 4141 端口本身没有入站身份认证，本机其他程序仍可能直接访问它。4140 的 Key 不能保护 4141。
+- **不要把两个端口映射到公网或共享网络。** `copilot-bridge` 的桥接端口（默认 4141）本身没有入站身份认证，本机其他程序仍可能直接访问它。适配器端口（默认 4140）的 Key 不能保护桥接端口。
 - 不要使用桥接服务的 `--show-token` 选项，不要公开原始日志；日志、错误信息和模型目录也可能包含账号相关数据。
 - 请求内容会经桥接服务发送给 GitHub Copilot。请遵守账号与组织的数据使用要求，不要提交不允许外发的内容。
 - 源码中的 `unused-local-bridge` 只是 OpenAI SDK 要求的非敏感占位字符串，不是登录凭据；真正的 GitHub 授权由桥接服务处理。
@@ -191,14 +228,14 @@ $path = Join-Path (Get-Location).Path 'adapter-config.json'
 npm test
 ```
 
-测试无需 GitHub 登录，也不会调用 Copilot。覆盖协议转换、工具调用、流式错误及空密钥 / 无效模型配置的启动拒绝行为；不替代真实账号的端到端验证。
+测试无需 GitHub 登录，也不会调用 Copilot。覆盖协议转换、工具调用、流式错误、端口配置及空密钥 / 无效模型配置的启动拒绝行为；不替代真实账号的端到端验证。
 
 | 文件 | 用途 |
 | --- | --- |
 | `adapter.mjs` | 本地鉴权、模型路由、HTTP / SSE 适配 |
 | `protocol.mjs` | Chat Completions 与 Responses 转换 |
 | `protocol.test.mjs` | 协议转换回归测试 |
-| `adapter.test.mjs` | 无效本地配置启动检查 |
+| `adapter.test.mjs` | 本地配置校验、自定义端口及启动脚本回归测试 |
 | `start.ps1` | Windows 双进程启动和清理 |
 | `adapter-config.example.json` | 无密钥配置模板 |
 | `package-lock.json` | 可复现的依赖版本 |
@@ -211,7 +248,7 @@ npm test
 | `401 Local API key required` | 客户端使用本地 `apiKey`，请求头必须是 `Authorization: Bearer ...`。 |
 | 模型不在目录中 | 使用确切 ID，刷新目录后重启适配器；账号权限以 GitHub 为准。 |
 | 模型要求 Responses / 不支持 Chat Completions | 在对应模型配置中加入 `"supported_endpoints": ["/responses"]` 并重启；不要对所有模型盲目设置。 |
-| `4140` / `4141` 已被占用 | 先自行确认并停止旧服务；脚本不会杀掉未知进程。 |
+| 配置端口已被占用 | 修改 `port` / `bridgePort`，或自行确认并停止旧服务；脚本不会杀掉未知进程。 |
 | 上游 `401` / `403` | 重新执行 `npm run auth`，检查订阅、组织策略和授权状态。 |
 | 上游 `429` | 降低调用频率，遵守订阅限额；默认请求间隔为 3 秒。 |
 | 连接失败 / `502` / 流中断 | 检查桥接初始化、网络和本机错误日志；上传日志前先脱敏。 |
