@@ -15,16 +15,16 @@
 - 仅监听 `127.0.0.1`，校验 Bearer Key，限制浏览器 Origin 和 16 MiB 请求体。
 - 不在适配器端暴露 `/v1/responses`、`/v1/messages`、`/v1/embeddings`，也不承诺完整兼容所有 OpenAI 参数。Responses 路径仅支持 `n=1`，不支持 `stop`。
 
-```text
-WorkBuddy / OpenAI-compatible client
-    |
-    | http://127.0.0.1:4140/v1 + local API Key
-    v
-adapter.mjs
-    |
-    | http://127.0.0.1:4141/v1
-    v
-copilot-bridge -> GitHub Copilot
+```mermaid
+flowchart TD
+    client["WorkBuddy / OpenAI-compatible client"]
+    adapter["adapter.mjs"]
+    bridge["copilot-bridge"]
+    copilot["GitHub Copilot"]
+
+    client -->|"http://127.0.0.1:4140/v1 + local API Key"| adapter
+    adapter -->|"http://127.0.0.1:4141/v1"| bridge
+    bridge --> copilot
 ```
 
 ## 环境要求
