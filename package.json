@@ -1,0 +1,18 @@
+{
+  "name": "github-copilot-proxy",
+  "description": "Local OpenAI-compatible GitHub Copilot adapter for WorkBuddy",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "auth": "copilot-bridge auth",
+    "start": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\start.ps1",
+    "test": "node --test protocol.test.mjs adapter.test.mjs"
+  },
+  "dependencies": {
+    "copilot-bridge": "2.1.0",
+    "openai": "7.45.0"
+  }
+}
