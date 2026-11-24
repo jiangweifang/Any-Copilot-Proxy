@@ -5,3 +5,6 @@
 !src/
 !src/copilot_proxy/
 !src/copilot_proxy/*.py
+**/__pycache__/
+**/*.pyc
+**/*.egg-info/

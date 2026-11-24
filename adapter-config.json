@@ -1,5 +1,12 @@
 {
   "host": "127.0.0.1",
   "port": 4140,
-  "bridgePort": 4141
+  "bridgePort": 4141,
+  "proxy": {
+    "type": "none",
+    "host": "",
+    "port": 8080,
+    "username": "",
+    "password": ""
+  }
 }

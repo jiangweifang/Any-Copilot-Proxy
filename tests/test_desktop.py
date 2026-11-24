@@ -9,7 +9,7 @@ from unittest.mock import patch
 try:
     from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox
     from PySide6.QtTest import QTest
-    from copilot_proxy.desktop import Dispatcher, MainWindow, ProxyDialog
+    from copilot_proxy.desktop import Dispatcher, ListenerDialog, MainWindow, ProxyDialog
     from copilot_proxy.config import UserStore
     HAS_QT = True
 except ImportError:
@@ -257,5 +257,42 @@ class DesktopTests(unittest.TestCase):
             self.assertTrue(window.disable_startup_button.isEnabled())
             self.assertEqual(window.notice.text(), "Permission denied")
             request.assert_not_called()
+            window.close()
+            window.deleteLater()
+
+    def test_listener_dialog_validates_confirms_and_preserves_unrelated_fields(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request") as request:
+            window = MainWindow(UserStore(Path(directory)), testing=True)
+            dialog = ListenerDialog(window.store, window)
+            self.assertFalse(dialog.save.isEnabled())
+            dialog.completed("listener-get", {"host": "127.0.0.1", "port": 4140, "bridgePort": 4141})
+            request.reset_mock()
+            dialog.port.setValue(4141)
+            with patch("copilot_proxy.desktop.confirm") as confirmation:
+                dialog.submit()
+            confirmation.assert_not_called()
+            request.assert_not_called()
+            self.assertIn("端口", dialog.message.text())
+            dialog.port.setValue(4240)
+            dialog.host.setText("127.0.0.2")
+            with patch("copilot_proxy.desktop.confirm", return_value=False):
+                dialog.submit()
+            request.assert_not_called()
+            with patch("copilot_proxy.desktop.confirm", return_value=True):
+                dialog.submit()
+            request.assert_called_once_with("listener-set", {"command": "listener-set", "listener": {"host": "127.0.0.2", "port": 4240}})
+            self.assertFalse(dialog.save.isEnabled())
+            self.assertFalse(dialog.cancel.isEnabled())
+            applied = []
+            dialog.applied.connect(applied.append)
+            result = {"state": "running", "baseUrl": "http://127.0.0.2:4240/v1"}
+            dialog.completed("listener-set", result)
+            self.assertEqual(applied, [result])
+            self.assertIn(result["baseUrl"], dialog.message.text())
+            dialog.retranslate("en")
+            self.assertEqual(dialog.save.text(), "Save and apply")
+            self.assertIn("4141", dialog.compatibility.text())
+            dialog.close()
+            dialog.deleteLater()
             window.close()
             window.deleteLater()

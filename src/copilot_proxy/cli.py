@@ -16,10 +16,22 @@ from .runtime import Runtime, control_request, safe_error, serve
 
 async def run_server(store: UserStore):
     loop = asyncio.get_running_loop()
+    task = asyncio.current_task()
+    terminating = False
+
+    def terminate():
+        nonlocal terminating
+        if not terminating:
+            terminating = True
+            task.cancel()
+
     if sys.platform != "win32":
-        loop.add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
+        loop.add_signal_handler(signal.SIGTERM, terminate)
     try:
         await serve(store)
+    except asyncio.CancelledError:
+        if not terminating:
+            raise
     finally:
         if sys.platform != "win32":
             loop.remove_signal_handler(signal.SIGTERM)

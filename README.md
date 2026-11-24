@@ -67,11 +67,12 @@ $env:PIP_INDEX_URL = 'https://packagefeedproxy.microsoft.io/pypi/simple/'
 - **Dashboard**：状态、访问地址；服务停止时仅显示“启动服务”，运行时仅显示“停止服务”，停止前必须确认。其后按实际配置显示“开机自动启动”或“禁用自启动”，禁用前必须确认；这两个操作不影响当前服务，仅控制当前用户下次登录后的自动启动。
 - **登录 / 退出登录（Sign in / Sign out）**：独立设备授权；登录成功后隐藏登录按钮，只显示用户名（获取失败时显示“登录成功”）和退出登录入口，退出后再显示登录按钮。退出登录必须确认（界面默认选择“否”，CLI 默认取消），确认后停止业务接口并清除登录，保留代理设置和自启动。再次登录系统时只显示未登录，不自动弹授权。
 - **Network settings**：直连、HTTP（包括 HTTPS CONNECT）、SOCKS5，支持用户名/密码与代理端 DNS。
+- **监听设置 / Listener settings**：修改 `host` 和主端口 `port`，保存到 `adapter-config.json`。保存前确认；服务运行时重新监听并中断当前请求，不重启程序进程，失败则恢复旧配置和监听。停止状态只保存，不自动启动。兼容端口 `bridgePort` 和其他字段保持不变。
 - **Test connection**：不保存设置，不消耗模型推理额度；未登录时测 GitHub 连通，登录后测 Copilot 权限和模型目录。
 - **Save and apply**：立即切换上游连接，不重启进程；正在进行的请求可能中断，会明确返回失败，不自动重发聊天。
 - **托盘**：支持的桌面环境中显示 Github Copilot Proxy，可打开主窗口、设置代理或退出。部分 Linux 桌面需要 AppIndicator/StatusNotifier 支持；无托盘时仍可使用主窗口。
 
-代理密码按用户选择**明文保存在私有用户配置文件**，输入框掩码显示，状态与日志不回显。请勿分享整个配置目录。
+监听与代理统一保存在 **`adapter-config.json`**，不使用 example 文件。代理密码按用户选择明文保存，输入框掩码显示，状态与日志不回显；配置中填写真实密码后不要提交到 Git 或复制进镜像。
 
 ## CLI（不需要 Qt）
 
@@ -90,7 +91,7 @@ python -m copilot_proxy.cli models --root <项目目录>
 
 `login` 登录完成后退出，不会变成常驻服务。`serve` 才启动常驻管理进程；未登录时不监听业务端口。`Ctrl+C` 停止前台服务。管理命令通过仅监听回环地址、带随机认证口令的私有控制通道通信，不暴露到业务 HTTP 接口。
 
-`proxy-set` / `proxy-test` 从标准输入读取 JSON，避免把密码放入进程命令行：
+CLI 用户可直接编辑 `adapter-config.json` 的 `host`、`port` 和 `proxy`，再执行 `stop`、`start` 加载；无需重启管理进程。兼容的 `proxy-set` / `proxy-test` 命令仍从标准输入读取 JSON，`proxy-set` 也保存到同一文件，避免把密码放入进程命令行：
 
 ```json
 {"type":"socks5","host":"127.0.0.1","port":1080,"username":"","password":""}
@@ -106,11 +107,20 @@ python -m copilot_proxy.cli models --root <项目目录>
 {
   "host": "127.0.0.1",
   "port": 4140,
-  "bridgePort": 4141
+  "bridgePort": 4141,
+  "proxy": {
+    "type": "none",
+    "host": "",
+    "port": 8080,
+    "username": "",
+    "password": ""
+  }
 }
 ```
 
 - `host`：合法 IPv4；`127.0.0.1` 仅本机，`0.0.0.0` 监听所有 IPv4 网卡，也可填写本机已有的具体地址。
+- `proxy.type`：`none`、`http` 或 `socks5`；`proxy.host` / `proxy.port` 为代理服务器地址与端口，账号密码可留空。这是上游代理，与程序的监听 `host` / `port` 不同。
+- 旧版本用户目录里的代理设置仅在文件没有 `proxy` 字段时兼容读取；新设置以 `adapter-config.json` 为准。登录凭据和界面语言仍在私有用户目录，不写进此文件。
 - 两个端口须为 `1..65535` 内不同的整数。现在由同一 Python 进程监听，不再运行 Node 桥接进程。
 - `port` 提供 `/v1/models`、`/v1/chat/completions`；`bridgePort` 为兼容端口，额外提供 `/v1/responses`。客户端应连接 `port`。
 - 模型按需缓存 5 分钟；未知模型最多每 10 秒触发一次提前刷新。改变代理或退出登录会清除旧目录及路由缓存。
@@ -120,6 +130,36 @@ python -m copilot_proxy.cli models --root <项目目录>
 - 不校验本地 API Key 或浏览器 Origin；浏览器自身 CORS/本地网络策略仍然有效。
 
 **不要向公网或不可信网络开放端口。** 能访问业务接口的程序可以消耗账号额度。应用不修改防火墙或系统代理；TLS 验证始终启用。填 `0.0.0.0` 后，其他设备应使用服务机器的实际 IP，而不是把 `0.0.0.0` 填成访问地址。
+
+## Docker（无界面）
+
+镜像只安装 Python 核心，不安装 PySide6。使用同一个 `adapter-config.json`，配置文件通过只读挂载提供，登录数据保存在独立命名卷，均不会打包进镜像。
+
+运行前把配置中的 `host` 设为 **`0.0.0.0`**，保留默认 `port: 4140` 或同步调整 Compose 的端口映射。不要与桌面版同时占用宿主机的 4140 端口。Linux 上需确保容器用户 UID `10001` 能读取挂载配置；不要为了方便而公开含密码的文件。
+
+```text
+docker compose build
+docker compose run --rm proxy login --root /config
+docker compose up -d
+docker compose logs -f proxy
+```
+
+构建镜像时也会读取 `PIP_INDEX_URL`，公司网络可在运行 `docker compose build` 前设置前文的镜像源。这里只传不含凭据的源地址；不要将带密码的地址放入构建参数。
+
+第二条命令只完成登录并退出；在浏览器完成设备授权后再启动服务。Compose 默认仅向宿主机 `127.0.0.1:4140` 发布主接口，不发布兼容端口或管理接口。
+
+容器中 `proxy.host: 127.0.0.1` 指的是容器自身；如果代理运行在宿主机上，填写 `host.docker.internal` 及对应端口。宿主机代理也必须允许容器访问，应用不会自动修改它的监听或防火墙。
+
+修改宿主机配置后重新创建容器，以确保文件挂载也更新：
+
+```text
+docker compose up -d --force-recreate
+docker compose exec proxy copilot-proxy status --root /config
+```
+
+运行中重新登录可用 `docker compose exec proxy copilot-proxy login --root /config`，完成后执行同样的 `start --root /config` 命令恢复服务。未登录时业务接口不监听，健康检查会显示不健康，这是预期状态。
+
+`docker compose down` 保留登录数据；确认不再需要账号缓存时，`docker compose down -v` 才会删除该项目的命名卷。配置中的代理密码需要在宿主机文件中另行清理。
 
 ## 自启动与干净卸载
 
@@ -132,7 +172,7 @@ python -m copilot_proxy.cli models --root <项目目录>
 
 退出程序不会退出 GitHub 登录；**Sign out** 才删除本工具的登录。删除本地凭据不等于在 GitHub 网站撤销 OAuth 授权。
 
-卸载可用桌面的 **卸载（Uninstall）**、Windows 的 `uninstall.bat`、`sh uninstall.sh` 或 CLI `uninstall`。桌面先弹出清理范围确认框，默认选择“否”；取消不停止服务、不删除数据。确认后才停止本工具，移除本安装的自启动、用户配置、登录、代理密码、缓存、已知日志和旧 `node_modules`；权限或文件占用错误会明确报告，可解决后重试。
+卸载可用桌面的 **卸载（Uninstall）**、Windows 的 `uninstall.bat`、`sh uninstall.sh` 或 CLI `uninstall`。桌面先弹出清理范围确认框，默认选择“否”；取消不停止服务、不删除数据。确认后才停止本工具，移除本安装的自启动、用户配置、登录、`adapter-config.json`（含代理密码）、缓存、已知日志和旧 `node_modules`；权限或文件占用错误会明确报告，可解决后重试。
 
 **最后退出程序，手动删除整个项目目录，包括 `.venv`、源码和 `.git`。** 运行中的解释器不能可靠地删除自身，因此不会把这一步伪装为已完成。不清除系统/Conda Python、全局 pip 缓存或其他工具的数据。
 

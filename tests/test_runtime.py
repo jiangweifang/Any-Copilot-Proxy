@@ -191,7 +191,9 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
             public = await asyncio.to_thread(control_request, self.store, {"command": "proxy-get"})
             self.assertNotIn("password", public)
             self.assertTrue(public["hasPassword"])
-            self.assertEqual(self.store.read("settings")["proxy"]["password"], "test-secret")
+            document = json.loads((self.root / "adapter-config.json").read_text())
+            self.assertEqual(document["proxy"]["password"], "test-secret")
+            self.assertEqual(document["port"], self.ports[0])
             first, second = InstanceLock(self.store), InstanceLock(self.store)
             try:
                 self.assertTrue(first.acquire())
@@ -208,6 +210,94 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(self.runtime.runner, runner)
         async with self.http.get(self.base + "/models") as response:
             self.assertIn("new-model", [model["id"] for model in (await response.json())["data"]])
+
+    async def test_listener_update_preserves_other_config_and_does_not_start_stopped_service(self):
+        path = self.root / "adapter-config.json"
+        document = json.loads(path.read_text())
+        document.update({"models": [{"id": "chat"}], "proxy": {"type": "none"}, "custom": {"keep": True}})
+        path.write_text(json.dumps(document), encoding="utf-8")
+        status = await self.runtime.execute({"command": "listener-set", "listener": {"host": "127.0.0.2", "port": self.ports[0]}})
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved, {**document, "host": "127.0.0.2"})
+        self.assertEqual(status["state"], "signed-out")
+        self.assertIsNone(self.runtime.runner)
+        self.assertEqual((await self.runtime.execute({"command": "listener-get"}))["bridgePort"], self.ports[1])
+
+    async def test_running_listener_change_rebinds_both_ports_without_restarting_process(self):
+        self.runtime.credentials = {"token": "private"}
+        await self.runtime.start()
+        process = self.runtime.status()["processId"]
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.2", 0))
+            port = reservation.getsockname()[1]
+        status = await self.runtime.set_listener("127.0.0.2", port)
+        self.assertEqual(status["processId"], process)
+        self.assertEqual(status["baseUrl"], f"http://127.0.0.2:{port}/v1")
+        for target_port in (port, self.ports[1]):
+            async with self.http.get(f"http://127.0.0.2:{target_port}/v1/models") as response:
+                self.assertEqual(response.status, 200)
+        with self.assertRaises(aiohttp.ClientConnectorError):
+            await self.http.get(self.base + "/models")
+
+    async def test_listener_bind_failure_restores_exact_config_and_old_service(self):
+        self.runtime.credentials = {"token": "private"}
+        await self.runtime.start()
+        path = self.root / "adapter-config.json"
+        original = path.read_bytes()
+        occupied = await asyncio.start_server(lambda reader, writer: writer.close(), "127.0.0.1", 0)
+        try:
+            port = occupied.sockets[0].getsockname()[1]
+            with self.assertLogs("copilot_proxy.runtime", level="ERROR"):
+                with self.assertRaisesRegex(RuntimeError, "previous settings and service were restored"):
+                    await self.runtime.set_listener("127.0.0.1", port)
+            self.assertEqual(path.read_bytes(), original)
+            self.assertEqual(self.runtime.status()["baseUrl"], self.base)
+            self.assertEqual(self.runtime.state, "running")
+            async with self.http.get(self.base + "/models") as response:
+                self.assertEqual(response.status, 200)
+            self.assertTrue(occupied.is_serving())
+        finally:
+            occupied.close()
+            await occupied.wait_closed()
+
+    async def test_listener_validation_or_file_write_failure_does_not_stop_service(self):
+        self.runtime.credentials = {"token": "private"}
+        await self.runtime.start()
+        runner = self.runtime.runner
+        with self.assertRaises(ValueError):
+            await self.runtime.set_listener("127.0.0.1", self.ports[1])
+        with patch("copilot_proxy.runtime.atomic_write", side_effect=PermissionError("read-only configuration")):
+            with self.assertRaises(PermissionError):
+                await self.runtime.set_listener("127.0.0.2", self.ports[0])
+        self.assertIs(self.runtime.runner, runner)
+        async with self.http.get(self.base + "/models") as response:
+            self.assertEqual(response.status, 200)
+
+    async def test_cli_file_edits_are_loaded_on_next_service_start(self):
+        self.runtime.credentials = {"token": "private"}
+        await self.runtime.start()
+        await self.runtime.stop()
+        path = self.root / "adapter-config.json"
+        document = json.loads(path.read_text())
+        document.update({"host": "127.0.0.2", "proxy": {"type": "http", "host": "localhost", "port": 8080}})
+        path.write_text(json.dumps(document))
+        await self.runtime.start()
+        self.assertEqual(self.runtime.listener.host, "127.0.0.2")
+        self.assertEqual(self.runtime.network.settings.type, "http")
+        async with self.http.get(f"http://127.0.0.2:{self.ports[0]}/v1/models") as response:
+            self.assertEqual(response.status, 200)
+
+    async def test_project_proxy_configuration_takes_precedence_over_legacy_settings(self):
+        path = self.root / "adapter-config.json"
+        document = json.loads(path.read_text())
+        document["proxy"] = {"type": "none"}
+        path.write_text(json.dumps(document))
+        self.store.write("settings", {"proxy": {"type": "http", "host": "localhost", "port": 8080}})
+        runtime = Runtime(self.store)
+        try:
+            self.assertEqual(runtime.network.settings.type, "none")
+        finally:
+            await runtime.close()
 
     async def test_http_proxy_and_socks_authentication_and_hot_disconnect(self):
         hits = []

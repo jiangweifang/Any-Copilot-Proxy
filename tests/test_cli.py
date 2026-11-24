@@ -6,11 +6,37 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from copilot_proxy.cli import dispatch
+from copilot_proxy.cli import dispatch, run_server
 from copilot_proxy.config import UserStore
 
 
 class CliTests(unittest.TestCase):
+    def test_sigterm_closes_the_server_without_an_error_exit(self):
+        async def exercise():
+            loop = asyncio.get_running_loop()
+            handler = None
+            finished = False
+
+            def register(signum, callback):
+                nonlocal handler
+                handler = callback
+
+            async def fake_serve(store):
+                nonlocal finished
+                try:
+                    handler()
+                    await asyncio.sleep(1)
+                finally:
+                    finished = True
+
+            with patch("copilot_proxy.cli.sys.platform", "linux"), \
+                 patch.object(loop, "add_signal_handler", side_effect=register), \
+                 patch.object(loop, "remove_signal_handler"), \
+                 patch("copilot_proxy.cli.serve", side_effect=fake_serve):
+                await asyncio.create_task(run_server(None))
+            self.assertTrue(finished)
+        asyncio.run(exercise())
+
     def test_logout_rejection_or_eof_does_not_contact_the_service(self):
         with tempfile.TemporaryDirectory() as directory:
             store = UserStore(Path(directory), Path(directory) / "user")
