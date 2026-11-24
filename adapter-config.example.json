@@ -1,6 +1,6 @@
 {
+  "host": "127.0.0.1",
   "port": 4140,
   "bridgePort": 4141,
-  "apiKey": "",
   "models": []
 }

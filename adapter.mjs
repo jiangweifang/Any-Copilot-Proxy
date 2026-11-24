@@ -1,11 +1,15 @@
 import { createServer } from 'node:http'
+import { isIPv4 } from 'node:net'
 import { readFileSync } from 'node:fs'
-import { timingSafeEqual } from 'node:crypto'
 import { once } from 'node:events'
 import OpenAI from 'openai'
 import { toResponses, toChat, toChatStream } from './protocol.mjs'
 
 const config = JSON.parse(readFileSync(new URL('./adapter-config.json', import.meta.url), 'utf8'))
+const host = config.host === undefined ? '127.0.0.1' : config.host
+if (typeof host !== 'string' || !isIPv4(host)) {
+  throw new Error('Set host to a valid IPv4 address in adapter-config.json')
+}
 const port = config.port === undefined ? 4140 : config.port
 const bridgePort = config.bridgePort === undefined ? 4141 : config.bridgePort
 for (const [name, value] of Object.entries({ port, bridgePort })) {
@@ -16,21 +20,18 @@ for (const [name, value] of Object.entries({ port, bridgePort })) {
 if (port === bridgePort) {
   throw new Error('port and bridgePort must be different in adapter-config.json')
 }
-if (typeof config.apiKey !== 'string' || !config.apiKey.trim()) {
-  throw new Error('Set a non-empty local apiKey in adapter-config.json; see README.md')
-}
 if (!Array.isArray(config.models) || config.models.length === 0
     || config.models.some(model => !model || typeof model.id !== 'string' || !model.id.trim())) {
   throw new Error('Populate models in adapter-config.json from the Copilot catalog; see README.md')
 }
+const upstreamHost = host === '0.0.0.0' ? '127.0.0.1' : host
 const upstream = new OpenAI({
   apiKey: 'unused-local-bridge',
-  baseURL: `http://127.0.0.1:${bridgePort}/v1`,
+  baseURL: `http://${upstreamHost}:${bridgePort}/v1`,
   maxRetries: 0,
   timeout: 300000,
 })
 const models = new Map(config.models.map(model => [model.id, model]))
-const auth = Buffer.from(`Bearer ${config.apiKey}`)
 
 async function writeEvent(response, value, signal) {
   if (response.destroyed) throw new Error('Client disconnected')
@@ -50,19 +51,6 @@ const server = createServer(async (request, response) => {
     if (!response.writableEnded) controller.abort()
   })
   try {
-    const origin = request.headers.origin
-    if (origin) {
-      let hostname
-      try { hostname = new URL(origin).hostname }
-      catch { return json(response, 403, { error: { message: 'Invalid browser origin' } }) }
-      if (!['localhost', '127.0.0.1', '[::1]'].includes(hostname)) {
-        return json(response, 403, { error: { message: 'Browser origin not allowed' } })
-      }
-    }
-    const supplied = Buffer.from(request.headers.authorization ?? '')
-    if (supplied.length !== auth.length || !timingSafeEqual(supplied, auth)) {
-      return json(response, 401, { error: { message: 'Local API key required' } })
-    }
     if (request.method === 'GET' && request.url === '/v1/models') {
       return json(response, 200, {
         object: 'list',
@@ -118,6 +106,6 @@ const server = createServer(async (request, response) => {
   }
 })
 
-server.listen(port, '127.0.0.1', () => {
-  console.log(`Copilot WorkBuddy adapter: http://127.0.0.1:${port} (${models.size} official models)`)
+server.listen(port, host, () => {
+  console.log(`Copilot WorkBuddy adapter: http://${host}:${port} (${models.size} official models)`)
 })
