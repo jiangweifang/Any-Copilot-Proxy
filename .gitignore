@@ -1,5 +1,4 @@
 node_modules/
-adapter-config.json
 adapter-config.*.json
 !adapter-config.example.json
 .env
