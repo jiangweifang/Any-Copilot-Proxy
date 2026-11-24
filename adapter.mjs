@@ -20,18 +20,69 @@ for (const [name, value] of Object.entries({ port, bridgePort })) {
 if (port === bridgePort) {
   throw new Error('port and bridgePort must be different in adapter-config.json')
 }
-if (!Array.isArray(config.models) || config.models.length === 0
-    || config.models.some(model => !model || typeof model.id !== 'string' || !model.id.trim())) {
-  throw new Error('Populate models in adapter-config.json from the Copilot catalog; see README.md')
+if (config.models !== undefined && (!Array.isArray(config.models)
+    || config.models.some(model => !model || typeof model.id !== 'string' || !model.id.trim()))) {
+  throw new Error('models in adapter-config.json must be a list of objects with an id, or be removed; see README.md')
 }
+const overrides = new Map((config.models ?? []).map(model => [model.id, model]))
 const upstreamHost = host === '0.0.0.0' ? '127.0.0.1' : host
+const bridgeURL = `http://${upstreamHost}:${bridgePort}/v1`
 const upstream = new OpenAI({
   apiKey: 'unused-local-bridge',
-  baseURL: `http://${upstreamHost}:${bridgePort}/v1`,
+  baseURL: bridgeURL,
   maxRetries: 0,
   timeout: 300000,
 })
-const models = new Map(config.models.map(model => [model.id, model]))
+
+const CATALOG_TTL = 5 * 60 * 1000
+const FORCED_REFRESH_INTERVAL = 10 * 1000
+let catalog = null
+let catalogFetchedAt = 0
+let forcedRefreshAt = 0
+let catalogRequest = null
+// Models without advertised endpoints that upstream rejected on Chat Completions.
+const responsesOnly = new Set()
+
+async function fetchCatalog() {
+  const response = await fetch(`${bridgeURL}/models`, { signal: AbortSignal.timeout(30000) })
+  if (!response.ok) throw new Error(`Bridge returned ${response.status} for /v1/models`)
+  const body = await response.json()
+  if (!Array.isArray(body?.data)) throw new Error('Bridge returned an invalid model catalog')
+  const models = body.data.filter(model => typeof model?.id === 'string' && model.id.trim())
+  if (models.length === 0) throw new Error('Bridge returned an empty model catalog')
+  return new Map(models.map(model => [model.id, { ...model, ...overrides.get(model.id) }]))
+}
+
+async function getCatalog({ refresh = false } = {}) {
+  const now = Date.now()
+  const stale = !catalog || now - catalogFetchedAt >= CATALOG_TTL
+  const forced = !stale && refresh && now - forcedRefreshAt >= FORCED_REFRESH_INTERVAL
+  if (!stale && !forced && !catalogRequest) return catalog
+  if (forced) forcedRefreshAt = now
+  catalogRequest ??= (async () => {
+    try {
+      const next = await fetchCatalog()
+      const added = catalog ? [...next.keys()].filter(id => !catalog.has(id)).length : next.size
+      if (added) console.log(`${new Date().toISOString()} model catalog: ${next.size} models (${added} new)`)
+      catalog = next
+      catalogFetchedAt = Date.now()
+    } catch (error) {
+      if (!catalog) {
+        throw Object.assign(new Error(`Copilot model catalog is unavailable: ${error.message}`), { status: 503 })
+      }
+      console.error(`${new Date().toISOString()} model catalog refresh failed, using cached list: ${error.message}`)
+    } finally {
+      catalogRequest = null
+    }
+    return catalog
+  })()
+  return catalogRequest
+}
+
+function requiresResponses(error) {
+  return error?.status === 400 && /unsupported_api_for_model|not (?:accessible|supported) (?:via|by|on) (?:the )?\/?chat\/completions|does not support (?:the )?\/?chat\/completions/i
+    .test(`${error.message} ${JSON.stringify(error.error ?? '')}`)
+}
 
 async function writeEvent(response, value, signal) {
   if (response.destroyed) throw new Error('Client disconnected')
@@ -52,9 +103,10 @@ const server = createServer(async (request, response) => {
   })
   try {
     if (request.method === 'GET' && request.url === '/v1/models') {
+      const models = await getCatalog()
       return json(response, 200, {
         object: 'list',
-        data: config.models.map(model => ({ id: model.id, object: 'model', owned_by: 'GitHub Copilot' })),
+        data: [...models.keys()].map(id => ({ id, object: 'model', owned_by: 'GitHub Copilot' })),
       })
     }
     if (request.method !== 'POST' || request.url !== '/v1/chat/completions') {
@@ -72,13 +124,26 @@ const server = createServer(async (request, response) => {
     let payload
     try { payload = JSON.parse(Buffer.concat(body).toString('utf8')) }
     catch { throw Object.assign(new Error('Invalid JSON request'), { status: 400 }) }
-    const model = models.get(payload.model)
+    let model = (await getCatalog()).get(payload.model)
+    model ??= (await getCatalog({ refresh: true })).get(payload.model)
     if (!model) throw Object.assign(new Error('Model is not in the official Copilot catalog'), { status: 400 })
-    const useResponses = model.supported_endpoints?.includes('/responses')
+    const endpoints = Array.isArray(model.supported_endpoints) && model.supported_endpoints.length
+      ? model.supported_endpoints
+      : null
+    let useResponses = endpoints ? endpoints.includes('/responses') : responsesOnly.has(model.id)
     const options = { signal: controller.signal }
-    const result = useResponses
-      ? await upstream.responses.create(toResponses(payload), options)
-      : await upstream.chat.completions.create(payload, options)
+    let result
+    if (!useResponses) {
+      try {
+        result = await upstream.chat.completions.create(payload, options)
+      } catch (error) {
+        if (endpoints || !requiresResponses(error)) throw error
+        responsesOnly.add(model.id)
+        useResponses = true
+        console.log(`${new Date().toISOString()} ${model.id} requires Responses; switching endpoint`)
+      }
+    }
+    if (useResponses) result = await upstream.responses.create(toResponses(payload), options)
     if (!payload.stream) {
       return json(response, 200, useResponses ? toChat(result, payload.model) : result)
     }
@@ -107,5 +172,8 @@ const server = createServer(async (request, response) => {
 })
 
 server.listen(port, host, () => {
-  console.log(`Copilot WorkBuddy adapter: http://${host}:${port} (${models.size} official models)`)
+  console.log(`Copilot WorkBuddy adapter: http://${host}:${port}`)
+  getCatalog().catch(error => {
+    console.error(`${new Date().toISOString()} ${error.message}; will retry on the next request`)
+  })
 })

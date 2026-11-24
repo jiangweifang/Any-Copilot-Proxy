@@ -27,18 +27,18 @@ function startWithConfig(config) {
   }
 }
 
-test('refuses to start with a missing, empty or malformed model catalog', () => {
-  for (const models of [undefined, [], [null], [{ id: '' }]]) {
+test('refuses malformed model overrides', () => {
+  for (const models of [null, {}, 'test-model', [null], [{ id: '' }], [{ id: 1 }]]) {
     const result = startWithConfig({ models })
     assert.ifError(result.error)
     assert.equal(result.status, 1)
-    assert.match(result.stderr, /Populate models/)
+    assert.match(result.stderr, /models in adapter-config\.json must be a list/)
   }
 })
 
 test('refuses invalid IPv4 listener addresses', () => {
   for (const host of [null, '', 'localhost', 0, ['127.0.0.1'], '256.0.0.1', '127.00.0.1', '127.1']) {
-    const result = startWithConfig({ host, models: [{ id: 'test-model' }] })
+    const result = startWithConfig({ host })
     assert.ifError(result.error)
     assert.equal(result.status, 1)
     assert.match(result.stderr, /Set host to a valid IPv4 address/)
@@ -46,7 +46,7 @@ test('refuses invalid IPv4 listener addresses', () => {
 })
 
 test('refuses invalid or conflicting adapter and bridge ports', () => {
-  const config = { models: [{ id: 'test-model' }] }
+  const config = {}
   for (const name of ['port', 'bridgePort']) {
     for (const value of [null, 0, -1, 65536, 4140.5, '4140']) {
       const result = startWithConfig({ ...config, [name]: value })
@@ -69,56 +69,91 @@ async function closeServer(server) {
   }
 }
 
+function chatReply(response, content) {
+  response.writeHead(200, { 'Content-Type': 'application/json' })
+  response.end(JSON.stringify({
+    id: 'test-completion',
+    object: 'chat.completion',
+    model: 'test-model',
+    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+  }))
+}
+
+function responsesReply(response, text) {
+  response.writeHead(200, { 'Content-Type': 'application/json' })
+  response.end(JSON.stringify({
+    id: 'test-response',
+    object: 'response',
+    status: 'completed',
+    output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] }],
+  }))
+}
+
+// Starts a fake bridge plus the adapter; `handle` answers non-catalog bridge requests.
+async function startAdapter(t, { host, catalog, config = {}, handle, bridgeDown = false }) {
+  const expectedHost = host ?? '127.0.0.1'
+  const connectHost = expectedHost === '0.0.0.0' ? '127.0.0.1' : expectedHost
+  const requests = []
+  const bridge = createServer(async (request, response) => {
+    let body = ''
+    for await (const part of request) body += part
+    if (request.method === 'GET' && request.url === '/v1/models') {
+      requests.push({ url: request.url })
+      response.writeHead(200, { 'Content-Type': 'application/json' })
+      return response.end(JSON.stringify({ object: 'list', data: catalog() }))
+    }
+    const parsed = JSON.parse(body)
+    requests.push({ url: request.url, body: parsed })
+    handle(request, response, parsed)
+  })
+  t.after(() => closeServer(bridge))
+  bridge.listen(0, connectHost)
+  await once(bridge, 'listening')
+  const bridgePort = bridge.address().port
+  if (bridgeDown) await closeServer(bridge)
+  const reservation = createServer()
+  t.after(() => closeServer(reservation))
+  reservation.listen(0, connectHost)
+  await once(reservation, 'listening')
+  const port = reservation.address().port
+  const directory = configFixture({ ...config, host, port, bridgePort })
+  await closeServer(reservation)
+  let child
+  t.after(async () => {
+    if (child && child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, 'exit')
+      child.kill()
+      await exited
+    }
+    rmSync(directory, { recursive: true, force: true })
+  })
+  child = spawn(process.execPath, [join(directory, 'adapter.mjs')], { stdio: ['ignore', 'pipe', 'pipe'] })
+  let stderr = ''
+  child.stderr.on('data', chunk => { stderr += chunk })
+  await new Promise((resolve, reject) => {
+    child.once('error', reject)
+    child.once('exit', code => reject(new Error(`Adapter exited (${code}): ${stderr}`)))
+    child.stdout.on('data', chunk => {
+      if (chunk.toString().includes(`http://${expectedHost}:${port}`)) resolve()
+    })
+  })
+  return { child, port, expectedHost, requests, baseURL: `http://${connectHost}:${port}/v1` }
+}
+
+function chat(baseURL, model, extra = {}) {
+  return fetch(`${baseURL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Hello' }], ...extra }),
+  })
+}
+
 for (const host of [undefined, '127.0.0.1', '0.0.0.0', '127.0.0.2']) {
   test(`serves requests without API key or Origin restrictions with host ${host ?? 'default'}`, { timeout: 15000 }, async t => {
-    const expectedHost = host ?? '127.0.0.1'
-    const connectHost = expectedHost === '0.0.0.0' ? '127.0.0.1' : expectedHost
-    const requests = []
-    const bridge = createServer(async (request, response) => {
-      let body = ''
-      for await (const part of request) body += part
-      requests.push({ url: request.url, body: JSON.parse(body) })
-      response.writeHead(200, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify({
-        id: 'test-completion',
-        object: 'chat.completion',
-        model: 'test-model',
-        choices: [{ index: 0, message: { role: 'assistant', content: 'Test reply' }, finish_reason: 'stop' }],
-      }))
-    })
-    t.after(() => closeServer(bridge))
-    bridge.listen(0, connectHost)
-    await once(bridge, 'listening')
-    const reservation = createServer()
-    t.after(() => closeServer(reservation))
-    reservation.listen(0, connectHost)
-    await once(reservation, 'listening')
-    const port = reservation.address().port
-    const directory = configFixture({
+    const { child, port, expectedHost, requests, baseURL } = await startAdapter(t, {
       host,
-      port,
-      bridgePort: bridge.address().port,
-      models: [{ id: 'test-model' }],
-    })
-    await closeServer(reservation)
-    let child
-    t.after(async () => {
-      if (child && child.exitCode === null && child.signalCode === null) {
-        const exited = once(child, 'exit')
-        child.kill()
-        await exited
-      }
-      rmSync(directory, { recursive: true, force: true })
-    })
-    child = spawn(process.execPath, [join(directory, 'adapter.mjs')], { stdio: ['ignore', 'pipe', 'pipe'] })
-    let stderr = ''
-    child.stderr.on('data', chunk => { stderr += chunk })
-    await new Promise((resolve, reject) => {
-      child.once('error', reject)
-      child.once('exit', code => reject(new Error(`Adapter exited (${code}): ${stderr}`)))
-      child.stdout.on('data', chunk => {
-        if (chunk.toString().includes(`http://${expectedHost}:${port}`)) resolve()
-      })
+      catalog: () => [{ id: 'test-model', object: 'model' }],
+      handle: (request, response) => chatReply(response, 'Test reply'),
     })
     if (process.platform === 'win32') {
       const listener = spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
@@ -128,7 +163,6 @@ for (const host of [undefined, '127.0.0.1', '0.0.0.0', '127.0.0.2']) {
       assert.equal(listener.status, 0, listener.stderr)
       assert.equal(listener.stdout.trim(), expectedHost)
     }
-    const baseURL = `http://${connectHost}:${port}/v1`
     const models = await fetch(`${baseURL}/models`)
     assert.equal(models.status, 200)
     assert.equal((await models.json()).data[0].id, 'test-model')
@@ -149,9 +183,80 @@ for (const host of [undefined, '127.0.0.1', '0.0.0.0', '127.0.0.2']) {
     })
     assert.equal(completion.status, 200)
     assert.equal((await completion.json()).choices[0].message.content, 'Test reply')
-    assert.deepEqual(requests, [{ url: '/v1/chat/completions', body: payload }])
+    assert.deepEqual(requests.filter(request => request.body), [{ url: '/v1/chat/completions', body: payload }])
   })
 }
+
+test('routes models from the live bridge catalog and remembers Responses-only models', { timeout: 15000 }, async t => {
+  let models = [
+    { id: 'chat-model' },
+    { id: 'responses-model', supported_endpoints: ['/responses'] },
+    { id: 'chat-only-model', supported_endpoints: ['/chat/completions'] },
+    { id: 'codex-model' },
+    { id: 'override-model' },
+  ]
+  const { requests, baseURL } = await startAdapter(t, {
+    catalog: () => models,
+    config: { models: [{ id: 'override-model', supported_endpoints: ['/responses'] }, { id: 'absent-model' }] },
+    handle: (request, response, body) => {
+      if (request.url === '/v1/responses') return responsesReply(response, `responses:${body.model}`)
+      if (['codex-model', 'chat-only-model'].includes(body.model)) {
+        response.writeHead(400, { 'Content-Type': 'application/json' })
+        return response.end(JSON.stringify({ error: {
+          message: JSON.stringify({ error: {
+            message: `model "${body.model}" is not accessible via the /chat/completions endpoint`,
+            code: 'unsupported_api_for_model',
+          } }),
+          type: 'error',
+        } }))
+      }
+      chatReply(response, `chat:${body.model}`)
+    },
+  })
+  const listed = await (await fetch(`${baseURL}/models`)).json()
+  assert.deepEqual(listed.data.map(model => model.id), models.map(model => model.id))
+
+  const routes = []
+  for (const model of ['chat-model', 'responses-model', 'override-model', 'codex-model', 'codex-model']) {
+    const before = requests.length
+    const response = await chat(baseURL, model)
+    assert.equal(response.status, 200, model)
+    assert.equal((await response.json()).choices[0].message.content,
+      `${model === 'chat-model' ? 'chat' : 'responses'}:${model}`)
+    routes.push(requests.slice(before).filter(request => request.body).map(request => request.url))
+  }
+  assert.deepEqual(routes, [
+    ['/v1/chat/completions'],
+    ['/v1/responses'],
+    ['/v1/responses'],
+    ['/v1/chat/completions', '/v1/responses'],
+    ['/v1/responses'],
+  ])
+
+  const chatOnly = await chat(baseURL, 'chat-only-model')
+  assert.equal(chatOnly.status, 400)
+
+  const catalogFetches = () => requests.filter(request => request.url === '/v1/models').length
+  const fetchesBefore = catalogFetches()
+  models = [...models, { id: 'new-model' }]
+  const added = await chat(baseURL, 'new-model')
+  assert.equal(added.status, 200)
+  assert.equal((await added.json()).choices[0].message.content, 'chat:new-model')
+  assert.equal(catalogFetches(), fetchesBefore + 1)
+
+  const unknown = await chat(baseURL, 'absent-model')
+  assert.equal(unknown.status, 400)
+  assert.match((await unknown.json()).error.message, /not in the official Copilot catalog/)
+})
+
+test('reports an unavailable bridge catalog without exiting', { timeout: 15000 }, async t => {
+  const { child, baseURL } = await startAdapter(t, { catalog: () => [], handle: () => {}, bridgeDown: true })
+  for (const response of [await fetch(`${baseURL}/models`), await chat(baseURL, 'test-model')]) {
+    assert.equal(response.status, 503)
+    assert.match((await response.json()).error.message, /Copilot model catalog is unavailable/)
+  }
+  assert.equal(child.exitCode, null)
+})
 
 test('Windows launcher validates host and ports, uses configured values and preserves legacy defaults', { skip: process.platform !== 'win32' }, () => {
   for (const [config, error] of [
