@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!pyproject.toml
+!constraints.txt
+!src/
+!src/copilot_proxy/
+!src/copilot_proxy/*.py

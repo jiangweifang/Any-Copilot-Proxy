@@ -1,0 +1,261 @@
+import os
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+try:
+    from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox
+    from PySide6.QtTest import QTest
+    from copilot_proxy.desktop import Dispatcher, MainWindow, ProxyDialog
+    from copilot_proxy.config import UserStore
+    HAS_QT = True
+except ImportError:
+    HAS_QT = False
+
+
+@unittest.skipUnless(HAS_QT, "Desktop extra is not installed")
+class DesktopTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_open_proxy_dialogs_do_not_shadow_dashboard_status(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request"):
+            store = UserStore(Path(directory), Path(directory) / "user")
+            window = MainWindow(store, testing=True)
+            first, second = ProxyDialog(store, window), ProxyDialog(store, window)
+            status = {"state": "running", "baseUrl": "http://127.0.0.1:4140/v1", "authenticated": True,
+                      "loginState": "idle", "message": "", "deviceCode": None}
+            window.dispatch.result.emit("status", status)
+            first.dispatch.result.emit("proxy-get", {"type": "socks5", "host": "localhost", "port": 1080, "hasPassword": True})
+            second.dispatch.error.emit("proxy-test", "Connection unavailable")
+            QTest.qWait(10)
+            self.assertEqual(window.badge.text(), "运行中")
+            self.assertEqual(first.kind.currentData(), "socks5")
+            self.assertEqual(first.password.echoMode(), QLineEdit.EchoMode.Password)
+            self.assertTrue(first.keep.isChecked())
+            self.assertIn("unavailable", second.message.text())
+            self.assertEqual(window.address.text(), status["baseUrl"])
+            for widget in (first, second, window):
+                widget.close()
+                widget.deleteLater()
+
+    def test_language_switch_updates_open_dialogs_and_persists_without_changing_proxy(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request") as request:
+            store = UserStore(Path(directory), Path(directory) / "user")
+            store.ensure()
+            store.write("settings", {"proxy": {"type": "none"}})
+            window = MainWindow(store, testing=True)
+            dialog = ProxyDialog(store, window)
+            self.assertEqual(window.language, "zh")
+            self.assertEqual(window.start_button.text(), "启动服务")
+            self.assertEqual(dialog.save.text(), "保存并应用")
+            dialog.kind.setCurrentIndex(dialog.kind.findData("socks5"))
+            dialog.host.setText("localhost")
+            dialog.port.setValue(1080)
+            window.language_box.setCurrentIndex(window.language_box.findData("en"))
+            self.assertEqual(window.start_button.text(), "Start service")
+            self.assertEqual(dialog.save.text(), "Save and apply")
+            self.assertEqual(dialog.kind.currentData(), "socks5")
+            self.assertEqual(dialog.host.text(), "localhost")
+            dialog.submit("proxy-test")
+            self.assertEqual(request.call_args.args[1]["proxy"]["type"], "socks5")
+            self.assertEqual(store.read("ui"), {"language": "en"})
+            self.assertEqual(store.read("settings"), {"proxy": {"type": "none"}})
+            restored = MainWindow(store, testing=True)
+            self.assertEqual(restored.language, "en")
+            self.assertEqual(restored.login_button.text(), "Sign in to GitHub")
+            window.language_box.setCurrentIndex(window.language_box.findData("zh"))
+            self.assertEqual(dialog.test.text(), "测试连接")
+            self.assertEqual(window.login_button.text(), "登录 GitHub")
+            for widget in (dialog, window, restored):
+                widget.close()
+                widget.deleteLater()
+
+    def test_background_completion_returns_to_the_gui_thread(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dispatcher = Dispatcher(UserStore(Path(directory)))
+            result = []
+            dispatcher.result.connect(lambda key, value: result.append((key, value)))
+            dispatcher.work("probe", lambda: {"ready": True})
+            for _ in range(50):
+                if result: break
+                QTest.qWait(20)
+            self.assertEqual(result, [("probe", {"ready": True})])
+            self.assertFalse(dispatcher.jobs)
+
+    def test_logout_requires_confirmation_and_defaults_to_no(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request") as request:
+            window = MainWindow(UserStore(Path(directory)), testing=True)
+            window.pending_login = True
+            def decline(box):
+                self.assertEqual(box.windowTitle(), "退出登录")
+                self.assertIs(box.defaultButton(), box.button(QMessageBox.StandardButton.No))
+                self.assertEqual(box.button(QMessageBox.StandardButton.No).text(), "否")
+                return QMessageBox.StandardButton.No
+            with patch.object(QMessageBox, "exec", decline):
+                window.logout()
+            request.assert_not_called()
+            self.assertTrue(window.pending_login)
+            with patch.object(QMessageBox, "exec", return_value=QMessageBox.StandardButton.Yes):
+                window.logout()
+            request.assert_called_once_with("logout", {"command": "logout"})
+            self.assertFalse(window.pending_login)
+            window.close()
+            window.deleteLater()
+
+    def test_signed_in_username_fallback_and_signout_follow_selected_language(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request"):
+            store = UserStore(Path(directory), Path(directory) / "user")
+            window = MainWindow(store, testing=True)
+            status = {"state": "running", "baseUrl": "http://127.0.0.1:4140/v1", "authenticated": True,
+                      "loginState": "complete", "message": "", "deviceCode": None, "username": "test-user"}
+            window.completed("status", status)
+            self.assertEqual(window.account.text(), "已登录：test-user")
+            window.language_box.setCurrentIndex(window.language_box.findData("en"))
+            self.assertEqual(window.account.text(), "Signed in as test-user")
+            window.completed("status", {**status, "username": None})
+            self.assertEqual(window.account.text(), "Signed in")
+            window.language_box.setCurrentIndex(window.language_box.findData("zh"))
+            self.assertEqual(window.account.text(), "登录成功")
+            window.completed("logout", {**status, "state": "signed-out", "authenticated": False, "loginState": "idle", "username": None})
+            self.assertEqual(window.account.text(), "未登录")
+            window.close()
+            window.deleteLater()
+
+    def test_login_button_only_appears_when_signed_out_and_not_authorizing(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request"):
+            store = UserStore(Path(directory), Path(directory) / "user")
+            window = MainWindow(store, testing=True)
+            self.assertTrue(window.login_button.isHidden())
+            self.assertTrue(window.logout_button.isHidden())
+            base = {"baseUrl": "http://127.0.0.1:4140/v1", "message": "", "deviceCode": None}
+            for state, authenticated, login_state, show_login, show_logout in (
+                ("signed-out", False, "idle", True, False),
+                ("signing-in", False, "pending", False, False),
+                ("running", True, "complete", False, True),
+                ("stopped", True, "idle", False, True),
+                ("signed-out", False, "idle", True, False),
+            ):
+                with self.subTest(state=state, authenticated=authenticated):
+                    window.completed("status", {**base, "state": state, "authenticated": authenticated,
+                                                "loginState": login_state, "username": None})
+                    self.assertEqual(not window.login_button.isHidden(), show_login)
+                    self.assertEqual(not window.logout_button.isHidden(), show_logout)
+            window.completed("status", {**base, "state": "running", "authenticated": True,
+                                        "loginState": "complete", "username": "test-user"})
+            window.language_box.setCurrentIndex(window.language_box.findData("en"))
+            self.assertTrue(window.login_button.isHidden())
+            self.assertFalse(window.logout_button.isHidden())
+            window.close()
+            window.deleteLater()
+
+    def test_service_buttons_are_mutually_exclusive_and_busy_states_are_disabled(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request"):
+            window = MainWindow(UserStore(Path(directory)), testing=True)
+            self.assertFalse(window.start_button.isHidden())
+            self.assertTrue(window.stop_button.isHidden())
+            self.assertFalse(window.start_button.isEnabled())
+            for state, authenticated, show_stop, can_act in (
+                ("signed-out", False, False, False),
+                ("stopped", True, False, True),
+                ("starting", True, False, False),
+                ("running", True, True, True),
+                ("stopping", True, True, False),
+                ("error", True, False, True),
+            ):
+                with self.subTest(state=state):
+                    window.completed("status", {"state": state, "authenticated": authenticated, "loginState": "idle",
+                                                "baseUrl": "http://127.0.0.1:4140/v1", "message": "", "deviceCode": None})
+                    self.assertEqual(window.start_button.isHidden(), show_stop)
+                    self.assertEqual(window.stop_button.isHidden(), not show_stop)
+                    active = window.stop_button if show_stop else window.start_button
+                    self.assertEqual(active.isEnabled(), can_act)
+            window.request("start")
+            self.assertFalse(window.start_button.isEnabled())
+            window.close()
+            window.deleteLater()
+
+    def test_stop_disable_startup_and_uninstall_require_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request") as request, \
+             patch.object(Dispatcher, "work") as work:
+            window = MainWindow(UserStore(Path(directory)), testing=True)
+            for action, title in ((window.stop_service, "停止服务"), (window.disable_startup, "禁用自启动"), (window.uninstall, "卸载此安装")):
+                with self.subTest(action=title):
+                    request.reset_mock()
+                    work.reset_mock()
+                    window.timer.start()
+                    def decline(box):
+                        self.assertEqual(box.windowTitle(), title)
+                        self.assertIs(box.defaultButton(), box.button(QMessageBox.StandardButton.No))
+                        return QMessageBox.StandardButton.No
+                    with patch.object(QMessageBox, "exec", decline):
+                        action()
+                    request.assert_not_called()
+                    work.assert_not_called()
+                    self.assertTrue(window.timer.isActive())
+                    with patch.object(QMessageBox, "exec", return_value=QMessageBox.StandardButton.Yes):
+                        action()
+                    if title == "停止服务":
+                        request.assert_called_once_with("stop", {"command": "stop"})
+                    else:
+                        self.assertEqual(work.call_args.args[0], "startup-disable" if title == "禁用自启动" else "cleanup")
+                        request.assert_not_called()
+            window.timer.stop()
+            window.close()
+            window.deleteLater()
+
+    def test_startup_toggle_verifies_state_without_starting_or_stopping_service(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request") as request, \
+             patch.object(Dispatcher, "work") as work, patch("copilot_proxy.desktop.install_startup") as install, \
+             patch("copilot_proxy.desktop.remove_startup") as remove, patch("copilot_proxy.desktop.startup_enabled") as enabled:
+            window = MainWindow(UserStore(Path(directory)), testing=True)
+            window.completed("status", {"state": "running", "authenticated": True, "loginState": "idle",
+                                        "baseUrl": "http://127.0.0.1:4140/v1", "message": "", "deviceCode": None})
+            window.completed("startup-status", False)
+            self.assertFalse(window.enable_startup_button.isHidden())
+            self.assertTrue(window.disable_startup_button.isHidden())
+            window.enable_startup()
+            self.assertFalse(window.enable_startup_button.isEnabled())
+            key, apply = work.call_args.args
+            enabled.return_value = True
+            window.completed(key, apply())
+            install.assert_called_once_with(window.store, True)
+            self.assertTrue(window.enable_startup_button.isHidden())
+            self.assertFalse(window.disable_startup_button.isHidden())
+            self.assertTrue(window.disable_startup_button.isEnabled())
+            with patch("copilot_proxy.desktop.confirm", return_value=True):
+                window.disable_startup()
+            key, apply = work.call_args.args
+            enabled.return_value = False
+            window.completed(key, apply())
+            remove.assert_called_once_with(window.store)
+            self.assertFalse(window.enable_startup_button.isHidden())
+            self.assertTrue(window.disable_startup_button.isHidden())
+            self.assertEqual(window.badge.text(), "运行中")
+            request.assert_not_called()
+            window.language_box.setCurrentIndex(window.language_box.findData("en"))
+            self.assertEqual(window.enable_startup_button.text(), "Enable login startup")
+            self.assertEqual(window.stop_button.text(), "Stop service")
+            window.close()
+            window.deleteLater()
+
+    def test_startup_failure_rechecks_actual_state_without_claiming_success(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request") as request, \
+             patch.object(Dispatcher, "work") as work:
+            window = MainWindow(UserStore(Path(directory)), testing=True)
+            window.completed("startup-status", True)
+            window.startup_busy = True
+            window.failed("startup-disable", "Permission denied")
+            self.assertFalse(window.enable_startup_button.isEnabled())
+            self.assertEqual(work.call_args.args[0], "startup-status")
+            window.completed("startup-status", True)
+            self.assertFalse(window.disable_startup_button.isHidden())
+            self.assertTrue(window.disable_startup_button.isEnabled())
+            self.assertEqual(window.notice.text(), "Permission denied")
+            request.assert_not_called()
+            window.close()
+            window.deleteLater()

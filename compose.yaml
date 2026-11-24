@@ -1,0 +1,22 @@
+services:
+  proxy:
+    build: .
+    image: github-copilot-proxy:local
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    ports:
+      - "127.0.0.1:4140:4140"
+    volumes:
+      - type: bind
+        source: ./adapter-config.json
+        target: /config/adapter-config.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - copilot-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  copilot-data:
