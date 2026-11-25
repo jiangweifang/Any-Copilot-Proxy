@@ -21,6 +21,26 @@ from .protocol import ProtocolError, ResponseStream, read_events, to_chat, to_re
 
 log = logging.getLogger(__name__)
 
+CONTROL_UNAVAILABLE = "Cannot connect to Github Copilot Proxy. The service state is unknown."
+CONTROL_LEGACY = "Control data belongs to the legacy Node version. Confirm that version has exited before restarting."
+CONTROL_INVALID = "Service control data is invalid or incompatible. Check this installation's data directory."
+CONTROL_CONNECTION_ERRORS = (CONTROL_UNAVAILABLE, CONTROL_LEGACY, CONTROL_INVALID)
+
+
+def validate_control_record(control: Any) -> dict:
+    if control is None:
+        raise ConnectionError(CONTROL_UNAVAILABLE)
+    if not isinstance(control, dict):
+        raise ConnectionError(CONTROL_INVALID)
+    if control.get("runtime") != "python":
+        if control.get("runtime") == "node" or ("key" in control and "pid" in control and "port" not in control):
+            raise ConnectionError(CONTROL_LEGACY)
+        raise ConnectionError(CONTROL_INVALID)
+    if (type(control.get("port")) is not int or not 1 <= control["port"] <= 65535
+            or not isinstance(control.get("token"), str) or not control["token"]):
+        raise ConnectionError(CONTROL_INVALID)
+    return control
+
 
 def safe_error(error: BaseException) -> str:
     if isinstance(error, (asyncio.CancelledError, TimeoutError)):
@@ -470,29 +490,30 @@ class ControlServer:
 
 
 def control_request(store: UserStore, request: dict, timeout: float = 125) -> Any:
-    control = store.read("control")
-    if not control or control.get("runtime") != "python":
-        raise ConnectionError("Python service is not running. Stop any old Node service before starting this version.")
+    control = validate_control_record(store.read("control"))
     data = json.dumps({**request, "token": control["token"]}).encode() + b"\n"
     if len(data) > 65536:
         raise ValueError("Control request too large.")
-    with socket.create_connection(("127.0.0.1", control["port"]), timeout=min(timeout, 2)) as sock:
-        sock.settimeout(timeout)
-        sock.sendall(data)
-        with sock.makefile("rb") as source:
-            reply = source.readline(65537)
-        if len(reply) > 65536 or not reply.endswith(b"\n"):
-            raise ValueError("Invalid control response.")
-        response = json.loads(reply)
+    try:
+        with socket.create_connection(("127.0.0.1", control["port"]), timeout=min(timeout, 2)) as sock:
+            sock.settimeout(timeout)
+            sock.sendall(data)
+            with sock.makefile("rb") as source:
+                reply = source.readline(65537)
+            if len(reply) > 65536 or not reply.endswith(b"\n"):
+                raise ValueError("Invalid control response.")
+            response = json.loads(reply)
+    except OSError as error:
+        raise ConnectionError(CONTROL_UNAVAILABLE) from error
     if not response.get("ok"):
         raise ValueError(response.get("error", "Control operation failed."))
     return response["result"]
 
 
 async def serve(store: UserStore):
-    legacy = store.read("control", {})
-    if legacy and legacy.get("runtime") != "python":
-        raise RuntimeError("A legacy Node control record exists. Exit the old tray/service first; do not start two versions together.")
+    existing = store.read("control")
+    if existing is not None:
+        validate_control_record(existing)
     store.ensure()
     lock = InstanceLock(store)
     if not lock.acquire():

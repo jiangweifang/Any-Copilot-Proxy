@@ -89,9 +89,9 @@ python -m copilot_proxy.cli shutdown --root <项目目录>
 python -m copilot_proxy.cli models --root <项目目录>
 ```
 
-`login` 登录完成后退出，不会变成常驻服务。`serve` 才启动常驻管理进程；未登录时不监听业务端口。`Ctrl+C` 停止前台服务。管理命令通过仅监听回环地址、带随机认证口令的私有控制通道通信，不暴露到业务 HTTP 接口。
+`login` 登录完成后退出，不会变成常驻服务。`serve` 才启动本程序的后台服务；未登录时不监听业务端口。`Ctrl+C` 停止前台服务。控制命令通过仅监听回环地址、带随机认证口令的私有控制通道通信，不暴露到业务 HTTP 接口。
 
-CLI 用户可直接编辑 `adapter-config.json` 的 `host`、`port` 和 `proxy`，再执行 `stop`、`start` 加载；无需重启管理进程。兼容的 `proxy-set` / `proxy-test` 命令仍从标准输入读取 JSON，`proxy-set` 也保存到同一文件，避免把密码放入进程命令行：
+CLI 用户可直接编辑 `adapter-config.json` 的 `host`、`port` 和 `proxy`，再执行 `stop`、`start` 加载；无需重启整个程序。兼容的 `proxy-set` / `proxy-test` 命令仍从标准输入读取 JSON，`proxy-set` 也保存到同一文件，避免把密码放入进程命令行：
 
 ```json
 {"type":"socks5","host":"127.0.0.1","port":1080,"username":"","password":""}
@@ -200,6 +200,7 @@ python -m unittest discover -s tests -v
 | 找不到 Python | 激活 Python 3.11+ 的 Conda 环境，或为安装脚本指定解释器绝对路径 |
 | 端口已占用 / 旧 Node 控制记录存在 | 先退出旧版本，勿并行启动两个版本 |
 | 无法访问模型目录 | 查看 Dashboard 状态，完成登录并测试代理 |
+| 显示“状态未知”/无法连接 Github Copilot Proxy | 这不代表业务接口已停止；界面会重试连接，成功后清除旧的连接错误提示。仅识别到旧版控制记录时才提示旧 Node 版本。 |
 | `401` / `403` | 检查账号、订阅和组织授权；代理不能改变服务权限 |
 | 无托盘图标 | 展开隐藏图标，或检查 Linux AppIndicator 支持；主窗口仍可使用 |
 | 模型仅支持 Responses | 通常按目录声明自动选择；必要时使用 `models` 路由覆盖 |

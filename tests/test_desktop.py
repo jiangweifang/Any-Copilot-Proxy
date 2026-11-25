@@ -11,6 +11,7 @@ try:
     from PySide6.QtTest import QTest
     from copilot_proxy.desktop import Dispatcher, ListenerDialog, MainWindow, ProxyDialog
     from copilot_proxy.config import UserStore
+    from copilot_proxy.runtime import CONTROL_UNAVAILABLE
     HAS_QT = True
 except ImportError:
     HAS_QT = False
@@ -294,5 +295,53 @@ class DesktopTests(unittest.TestCase):
             self.assertIn("4141", dialog.compatibility.text())
             dialog.close()
             dialog.deleteLater()
+            window.close()
+            window.deleteLater()
+
+    def test_initial_connection_warning_is_cleared_after_status_recovers(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request"):
+            window = MainWindow(UserStore(Path(directory)), testing=True)
+            window.failed("status", CONTROL_UNAVAILABLE)
+            self.assertEqual(window.badge.text(), "状态未知")
+            self.assertNotIn("Node", window.notice.text())
+            status = {"state": "running", "authenticated": True, "loginState": "idle",
+                      "baseUrl": "http://127.0.0.1:4140/v1", "message": "", "deviceCode": None}
+            window.completed("status", status)
+            self.assertEqual(window.badge.text(), "运行中")
+            self.assertEqual(window.detail.text(), "服务已就绪，可以发送请求。")
+            self.assertEqual(window.notice.text(), "连接已恢复，当前服务状态已更新。")
+            self.assertEqual(window.raw_notice, "")
+            self.assertTrue(window.manager_connected)
+            window.close()
+            window.deleteLater()
+
+    def test_lost_connection_hides_stale_state_and_keeps_unrelated_operation_errors(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request"):
+            store = UserStore(Path(directory), Path(directory) / "user")
+            window = MainWindow(store, testing=True)
+            status = {"state": "running", "authenticated": True, "loginState": "idle",
+                      "baseUrl": "http://127.0.0.1:4140/v1", "message": "", "deviceCode": None, "username": "test-user"}
+            window.completed("status", status)
+            window.failed("start", CONTROL_UNAVAILABLE)
+            self.assertFalse(window.manager_connected)
+            self.assertFalse(window.authenticated)
+            self.assertEqual(window.badge.text(), "状态未知")
+            self.assertIn("可能仍在运行", window.detail.text())
+            self.assertNotIn("test-user", window.account.text())
+            self.assertTrue(window.login_button.isHidden())
+            self.assertTrue(window.logout_button.isHidden())
+            self.assertFalse(window.start_button.isEnabled())
+            self.assertFalse(window.stop_button.isEnabled())
+            self.assertFalse(window.listener_button.isEnabled())
+            window.language_box.setCurrentIndex(window.language_box.findData("en"))
+            self.assertEqual(window.badge.text(), "UNKNOWN")
+            window.completed("status", status)
+            self.assertTrue(window.manager_connected)
+            self.assertTrue(window.stop_button.isEnabled())
+            self.assertEqual(window.account.text(), "Signed in as test-user")
+            self.assertEqual(window.notice.text(), "Connection restored. Service status is up to date.")
+            window.failed("startup-disable", "Permission denied")
+            window.completed("status", status)
+            self.assertEqual(window.notice.text(), "Permission denied")
             window.close()
             window.deleteLater()

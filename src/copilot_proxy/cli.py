@@ -109,7 +109,7 @@ async def dispatch(command: str, store: UserStore, request: dict):
     try:
         if command in ("login", "install"):
             if remote:
-                raise RuntimeError("Stop the running manager before installing again.")
+                raise RuntimeError("Stop Github Copilot Proxy before installing again.")
             await login_local(runtime)
             if command == "install":
                 print(await asyncio.to_thread(install_startup, store, False))

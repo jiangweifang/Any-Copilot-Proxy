@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFor
 from .config import InstanceLock, ListenerSettings, UserStore
 from .i18n import TEXT, localize_message, tr
 from .platforms import clean_installation, install_startup, remove_startup, startup_enabled
-from .runtime import control_request, safe_error, serve
+from .runtime import CONTROL_CONNECTION_ERRORS, control_request, safe_error, serve
 
 STYLE = """
 QWidget { background:#10131b; color:#e8eaf4; font-size:14px; }
@@ -396,6 +396,8 @@ class MainWindow(QMainWindow):
         if self.language not in TEXT:
             raise ValueError("Unsupported UI language; use zh or en in ui.json.")
         self.notice_key, self.raw_notice = "first_time", ""
+        self.notice_source = None
+        self.manager_connected = False
         self.last_status = None
         self.badge_code = "connecting"
         self.dispatch = Dispatcher(store, self)
@@ -437,7 +439,7 @@ class MainWindow(QMainWindow):
         self.address.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.address.setStyleSheet("font-size:22px; font-weight:600;")
         content.addWidget(self.address)
-        self.detail = label("Checking the local manager...", "muted")
+        self.detail = label("", "muted")
         content.addWidget(self.detail)
         actions = QHBoxLayout()
         self.start_button, self.stop_button = QPushButton("Start service"), QPushButton("Stop")
@@ -609,6 +611,9 @@ class MainWindow(QMainWindow):
             self.exiting = True
             QApplication.instance().quit()
             return
+        self.manager_connected = True
+        if self.notice_source in ("status", "manager", "connection"):
+            self.set_notice("control_connected")
         self.last_status = result
         self.badge_code = result["state"]
         if command in ("start", "stop"):
@@ -633,7 +638,17 @@ class MainWindow(QMainWindow):
 
     @Slot(str, str)
     def failed(self, command, error):
-        self.set_message(error)
+        self.set_message(error, source=command)
+        connection_failed = command == "status" or error in CONTROL_CONNECTION_ERRORS
+        if connection_failed:
+            self.manager_connected = False
+            self.authenticated = False
+            self.badge_code = "unreachable"
+            self.login_button.hide()
+            self.logout_button.hide()
+            for widget in (self.device_code, self.open_browser, self.cancel_login):
+                widget.hide()
+            self.render_status()
         if command in ("start", "stop"):
             self.service_busy = False
             self.render_service_controls()
@@ -644,9 +659,6 @@ class MainWindow(QMainWindow):
             self.render_startup_controls()
             if command != "startup-status":
                 self.refresh_startup()
-        if command == "status":
-            self.badge_code = "offline"
-            self.render_status()
         if command == "cleanup":
             self.timer.start()
         if command == "shutdown":
@@ -666,7 +678,7 @@ class MainWindow(QMainWindow):
                     if self.manager_thread:
                         self.manager_thread.join(timeout=10)
                         if self.manager_thread.is_alive():
-                            raise RuntimeError("Manager is still stopping; retry cleanup.")
+                            raise RuntimeError("The application is still stopping; retry cleanup.")
                     if self.desktop_lock:
                         self.desktop_lock.close()
                     return clean_installation(self.store)
@@ -695,15 +707,21 @@ class MainWindow(QMainWindow):
 
     def set_notice(self, key):
         self.notice_key = key
+        self.raw_notice = ""
+        self.notice_source = None
         self.notice.setText(tr(self.language, key))
 
-    def set_message(self, message):
+    def set_message(self, message, *, source=None):
         self.notice_key, self.raw_notice = None, message
+        self.notice_source = "connection" if message in CONTROL_CONNECTION_ERRORS else source
         self.notice.setText(localize_message(self.language, message))
 
     def render_status(self):
         self.badge.setText(TEXT[self.language].get(self.badge_code, self.badge_code))
-        if self.last_status:
+        if not self.manager_connected:
+            self.account.setText(tr(self.language, "account_unavailable") if self.badge_code == "unreachable" else tr(self.language, "account_checking"))
+            self.detail.setText(tr(self.language, "control_state_unknown") if self.badge_code == "unreachable" else tr(self.language, "checking"))
+        elif self.last_status:
             if self.last_status["loginState"] == "pending":
                 account_text = tr(self.language, "signing-in")
             elif self.last_status["authenticated"]:
@@ -730,7 +748,8 @@ class MainWindow(QMainWindow):
                          self.last_status["loginState"] != "pending" and state in ("stopped", "error"))
         self.start_button.setEnabled(can_start and not self.service_busy)
         self.stop_button.setEnabled(state == "running" and not self.service_busy)
-        self.listener_button.setEnabled(not self.service_busy and state not in ("starting", "stopping"))
+        self.listener_button.setEnabled(self.manager_connected and not self.service_busy and state not in ("starting", "stopping"))
+        self.proxy_button.setEnabled(self.manager_connected)
 
     def render_startup_controls(self):
         self.enable_startup_button.setVisible(self.startup_enabled is not True)
@@ -740,7 +759,7 @@ class MainWindow(QMainWindow):
         self.disable_startup_button.setEnabled(enabled)
         authenticated = bool(self.last_status and self.last_status["authenticated"])
         self.setup_button.setVisible(not authenticated)
-        self.setup_button.setEnabled(enabled and not self.service_busy and
+        self.setup_button.setEnabled(self.manager_connected and enabled and not self.service_busy and
                                      not (self.last_status and self.last_status["loginState"] == "pending"))
 
     @Slot(int)
@@ -812,7 +831,7 @@ def main():
     if args.setup:
         window.set_notice("setup_notice")
     error_timer = QTimer(window)
-    error_timer.timeout.connect(lambda: window.set_message(errors.pop()) if errors else None)
+    error_timer.timeout.connect(lambda: window.set_message(errors.pop(), source="manager") if errors else None)
     error_timer.start(1000)
     window.show()
     result = app.exec()

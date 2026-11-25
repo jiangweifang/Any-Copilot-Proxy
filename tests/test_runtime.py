@@ -14,7 +14,7 @@ from aiohttp import web
 from copilot_proxy.config import InstanceLock, ListenerSettings, ProxySettings, UserStore
 from copilot_proxy.network import CopilotClient, DeviceCode, Network, UpstreamError
 from copilot_proxy.platforms import clean_installation, install_startup, remove_startup
-from copilot_proxy.runtime import ControlServer, Runtime, control_request
+from copilot_proxy.runtime import CONTROL_INVALID, CONTROL_LEGACY, CONTROL_UNAVAILABLE, ControlServer, Runtime, control_request
 
 
 class Content:
@@ -200,6 +200,30 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(second.acquire())
             finally: first.close(); second.close()
         finally: await control.close()
+
+    async def test_control_connection_errors_do_not_claim_a_legacy_node_process_exists(self):
+        with patch("copilot_proxy.runtime.socket.create_connection") as connect:
+            for record, expected in (
+                (None, CONTROL_UNAVAILABLE),
+                ({"runtime": "unknown"}, CONTROL_INVALID),
+                ({"runtime": "python", "port": False, "token": "test"}, CONTROL_INVALID),
+                ({"key": "legacy-test-key", "pid": 123}, CONTROL_LEGACY),
+            ):
+                with self.subTest(record=record):
+                    if record is None:
+                        self.store.delete("control")
+                    else:
+                        self.store.write("control", record)
+                    with self.assertRaises(ConnectionError) as raised:
+                        control_request(self.store, {"command": "status"})
+                    self.assertEqual(str(raised.exception), expected)
+            connect.assert_not_called()
+            self.store.write("control", {"runtime": "python", "port": 12345, "token": "test"})
+            connect.side_effect = ConnectionRefusedError("No listener")
+            with self.assertRaises(ConnectionError) as raised:
+                control_request(self.store, {"command": "status"})
+            self.assertEqual(str(raised.exception), CONTROL_UNAVAILABLE)
+            self.assertNotIn("Node", str(raised.exception))
 
     async def test_network_switch_keeps_listeners_and_clears_catalog(self):
         self.runtime.credentials = {"token": "private"}
