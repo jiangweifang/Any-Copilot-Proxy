@@ -1,17 +1,57 @@
 param([string]$Python, [switch]$Headless)
 $ErrorActionPreference = 'Stop'
-$candidates = @()
-if ($Python) { $candidates += $Python }
-$candidates += @(Get-Command python,python3 -CommandType Application -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source)
-if ($env:CONDA_PREFIX) { $candidates += Join-Path $env:CONDA_PREFIX 'python.exe' }
-$candidates += @((Join-Path $HOME 'miniconda3\python.exe'), 'C:\ProgramData\miniconda3\python.exe',
-    (Join-Path $HOME 'anaconda3\python.exe'), 'C:\ProgramData\anaconda3\python.exe')
-$interpreter = $null
-foreach ($candidate in $candidates) {
-    if ($candidate -like '*\WindowsApps\*' -or -not (Test-Path -LiteralPath $candidate)) { continue }
-    try { & $candidate -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>$null } catch { continue }
-    if ($LASTEXITCODE -eq 0) { $interpreter = $candidate; break }
+
+function Get-PythonCandidates {
+    if ($Python) { $Python }
+    if ($env:CONDA_PREFIX) { [System.IO.Path]::Combine($env:CONDA_PREFIX, 'python.exe') }
+
+    $condaCommands = @($env:CONDA_EXE, $env:_CONDA_EXE)
+    $condaCommands += @(Get-Command conda -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Source)
+    foreach ($command in $condaCommands) {
+        if (-not $command) { continue }
+        $directory = Split-Path -Parent $command
+        if (-not $directory) { continue }
+        if ((Split-Path -Leaf $directory) -in @('Scripts', 'condabin')) {
+            $directory = Split-Path -Parent $directory
+        }
+        [System.IO.Path]::Combine($directory, 'python.exe')
+    }
+
+    $environments = Join-Path $HOME '.conda\environments.txt'
+    if (Test-Path -LiteralPath $environments -PathType Leaf) {
+        foreach ($prefix in (Get-Content -LiteralPath $environments)) {
+            if ($prefix.Trim()) { [System.IO.Path]::Combine($prefix.Trim(), 'python.exe') }
+        }
+    }
+    $locations = @($HOME, $env:LOCALAPPDATA, $env:ProgramData, 'C:\ProgramData')
+    foreach ($location in $locations) {
+        if (-not $location) { continue }
+        foreach ($distribution in @('miniconda3', 'anaconda3', 'miniforge3', 'mambaforge')) {
+            [System.IO.Path]::Combine($location, "$distribution\python.exe")
+        }
+    }
+    Get-Command python,python3 -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty Source
 }
+
+function Find-PythonInterpreter {
+    $seen = @{}
+    foreach ($candidate in (Get-PythonCandidates)) {
+        if ($seen.ContainsKey($candidate)) { continue }
+        $seen[$candidate] = $true
+        if ($candidate -like '*\WindowsApps\*' -or
+            -not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        try {
+            & $candidate -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' 2>$null
+        } catch {
+            Write-Warning "Cannot check Python interpreter '$candidate': $_"
+            continue
+        }
+        if ($LASTEXITCODE -eq 0) { return $candidate }
+    }
+}
+$interpreter = Find-PythonInterpreter
 if (-not $interpreter) {
     Write-Host '未找到 Python 3.11 或更高版本。' -ForegroundColor Red
     Write-Host '请任选一种方式解决：'

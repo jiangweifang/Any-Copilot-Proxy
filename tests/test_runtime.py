@@ -12,7 +12,8 @@ import aiohttp
 from aiohttp import web
 
 from copilot_proxy.config import InstanceLock, ListenerSettings, ProxySettings, UserStore
-from copilot_proxy.network import CopilotClient, DeviceCode, Network, UpstreamError
+from copilot_proxy.network import Network, UpstreamError
+from copilot_proxy.github_copilot.client import CopilotClient, DeviceCode
 from copilot_proxy.platforms import clean_installation, install_startup, remove_startup
 from copilot_proxy.runtime import CONTROL_INVALID, CONTROL_LEGACY, CONTROL_UNAVAILABLE, ControlServer, Runtime, control_request
 
@@ -166,10 +167,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         code = DeviceCode("device", "USER", "https://github.com/login/device", 30, 1)
         responses = [{"error": "authorization_pending"}, {"error": "slow_down"}, {"access_token": "test-token"},
                      {"token": "session", "endpoints": {"api": "https://api.githubcopilot.com"}, "refresh_in": 300}]
-        with patch.object(client, "json", new=AsyncMock(side_effect=responses)), patch("copilot_proxy.network.asyncio.sleep", new=AsyncMock()) as sleep:
+        with patch.object(client, "json", new=AsyncMock(side_effect=responses)), patch("copilot_proxy.github_copilot.client.asyncio.sleep", new=AsyncMock()) as sleep:
             self.assertEqual(await client.complete_login(code), "test-token")
             self.assertEqual([call.args[0] for call in sleep.await_args_list], [1, 1, 6])
-        with patch.object(client, "json", new=AsyncMock(return_value={"error": "access_denied"})), patch("copilot_proxy.network.asyncio.sleep", new=AsyncMock()):
+        with patch.object(client, "json", new=AsyncMock(return_value={"error": "access_denied"})), patch("copilot_proxy.github_copilot.client.asyncio.sleep", new=AsyncMock()):
             with self.assertRaisesRegex(ValueError, "denied"):
                 await client.complete_login(code)
         await client.network.close()

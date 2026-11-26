@@ -3,10 +3,25 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from copilot_proxy.config import ListenerSettings, ProxySettings, UserStore
+from copilot_proxy.config import ListenerSettings, LoggingSettings, M365Settings, ProxySettings, UserStore
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_logging_switch_requires_a_boolean(self):
+        for value in ("false", 0, None):
+            with self.assertRaises(ValueError):
+                ListenerSettings.from_data({"logging": {"enabled": value}})
+        self.assertFalse(LoggingSettings.from_data({"logging": {"enabled": False}}).enabled)
+
+    def test_control_port_cannot_collide_with_api_ports_or_accept_invalid_types(self):
+        for data in ({"m365": {"controlPort": 4140}}, {"m365": {"controlPort": True}},
+                     {"m365": {"controlPort": 65536}}, {"m365": {"enabled": "false"}}):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                ListenerSettings.from_data(data)
+        settings = M365Settings.from_data({"m365": {"enabled": False, "controlPort": 43210}})
+        self.assertFalse(settings.enabled)
+        self.assertEqual(settings.control_port, 43210)
+
     def test_listener_defaults_specific_addresses_and_invalid_values(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

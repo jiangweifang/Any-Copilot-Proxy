@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack, aclosing, suppress
 from copy import deepcopy
 from dataclasses import asdict
 import json
@@ -15,8 +15,13 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-from .config import InstanceLock, ListenerSettings, ProxySettings, UserStore, atomic_write, read_project_config
-from .network import CopilotClient, Network, UpstreamError
+from .config import InstanceLock, ListenerSettings, LoggingSettings, M365Settings, ProxySettings, UserStore, atomic_write, read_project_config
+from .network import Network, UpstreamError
+from .github_copilot.client import CopilotClient
+from .m365_copilot.auth import M365Auth
+from .m365_copilot.client import M365Client
+from .m365_copilot.protocol import collect_chat
+from .logging_setup import API_FAILED, ROUTE_MODEL, ROUTE_PROVIDER, RuntimeLog, request_logging, response_request_id, runtime_logging
 from .protocol import ProtocolError, ResponseStream, read_events, to_chat, to_responses
 
 log = logging.getLogger(__name__)
@@ -53,66 +58,198 @@ def safe_error(error: BaseException) -> str:
 
 
 class Runtime:
-    def __init__(self, store: UserStore, *, client: CopilotClient | None = None, request_interval: float = 3):
+    def __init__(self, store: UserStore, *, client: CopilotClient | None = None,
+                 m365_client: M365Client | None = None, request_interval: float = 3, log_manager: RuntimeLog | None = None):
         self.store = store
+        self.log_manager = log_manager or RuntimeLog(store)
+        self.owns_log_manager = log_manager is None
         self.listener = ListenerSettings.load(store.root)
         self.network = client.network if client else Network(self.configured_proxy(read_project_config(store.root)))
         self.client = client or CopilotClient(self.network)
+        self.m365_network = m365_client.network if m365_client else Network(self.network.settings)
+        self.m365_client = m365_client or M365Client(self.m365_network)
         self.credentials = store.read("auth")
-        self.state = "stopped" if self.credentials else "signed-out"
+        self._m365: M365Auth | None = None
+        self.state = "stopped" if self.credentials or self.m365_ready() else "signed-out"
         self.message = ""
         self.runner = None
         self.catalog = None
         self.catalog_at = 0.0
         self.forced_at = 0.0
         self.catalog_lock = asyncio.Lock()
+        self.m365_catalog = None
+        self.m365_catalog_at = 0.0
+        self.m365_catalog_key = None
+        self.m365_catalog_lock = asyncio.Lock()
+        self.m365_rate_lock = asyncio.Lock()
+        self.m365_next_request = 0.0
         self.lifecycle = asyncio.Lock()
         self.rate_lock = asyncio.Lock()
         self.next_request = 0.0
         self.request_interval = request_interval
         self.routes = set()
         self.generation = 0
+        self.github_generation = 0
         self.login_task = None
         self.login_state = "idle"
         self.device = None
         self.shutdown = asyncio.Event()
         self.active_requests: set[asyncio.Task] = set()
+        self.active_channels: dict[asyncio.Task, str] = {}
+        self.running_requested = False
 
     def configured_proxy(self, document: dict) -> ProxySettings:
         return ProxySettings.parse(document["proxy"] if "proxy" in document else self.store.read("settings", {}).get("proxy", {}))
 
+    def m365_auth(self) -> M365Auth:
+        if self._m365 is None:
+            self._m365 = M365Auth(self.store)
+        return self._m365
+
+    def m365_ready(self) -> bool:
+        return self.m365_auth().status()["state"] == "captured"
+
     def status(self) -> dict:
+        m365 = self.m365_auth().status()
+        m365["chatReady"] = m365["state"] == "captured" and self.runner is not None
         return {"state": self.state, "message": self.message, "baseUrl": self.listener.base_url,
-                "authenticated": bool(self.credentials), "processId": os.getpid(), "loginState": self.login_state,
+                "authenticated": bool(self.credentials) or self.m365_ready(), "githubAuthenticated": bool(self.credentials),
+                "processId": os.getpid(), "loginState": self.login_state,
                 "username": self.credentials.get("username") if self.credentials else None,
                 "deviceCode": self.device.user_code if self.device else None,
-                "verificationUri": self.device.verification_uri if self.device else None}
+                "verificationUri": self.device.verification_uri if self.device else None,
+                "logFile": str(self.store.directory / "logs" / "gateway.log"),
+                "logging": {"enabled": LoggingSettings.load(self.store.root).enabled, "active": self.log_manager.enabled},
+                "m365": m365}
+
+    async def set_logging(self, enabled: bool) -> dict:
+        if type(enabled) is not bool:
+            raise ValueError("Logging settings require a boolean enabled field.")
+        async with self.lifecycle:
+            document = read_project_config(self.store.root)
+            LoggingSettings.from_data(document)
+            document["logging"] = {**document.get("logging", {}), "enabled": enabled}
+            was_enabled = self.log_manager.enabled
+            self.log_manager.set_enabled(enabled)
+            try:
+                atomic_write(self.store.root / "adapter-config.json", (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode())
+            except OSError:
+                self.log_manager.set_enabled(was_enabled)
+                raise
+            return self.status()
+
+    def m365_settings(self) -> dict:
+        settings = M365Settings.load(self.store.root)
+        control = self.store.read("control", {})
+        return {"enabled": settings.enabled, "controlPort": settings.control_port, "activeControlPort": control.get("port", 0)}
+
+    async def set_m365_settings(self, changes: dict) -> dict:
+        if not isinstance(changes, dict) or not changes or set(changes) - {"enabled", "controlPort"}:
+            raise ValueError("M365 settings accept only enabled and controlPort.")
+        async with self.lifecycle:
+            document = read_project_config(self.store.root)
+            document["m365"] = {**document.get("m365", {}), **changes}
+            settings = M365Settings.from_data(document)
+            active_port = self.store.read("control", {}).get("port", 0)
+            if settings.control_port and settings.control_port != active_port:
+                try:
+                    with socket.socket() as probe:
+                        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                            probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                        probe.bind(("127.0.0.1", settings.control_port))
+                except OSError:
+                    raise ValueError("The selected control port is already in use.") from None
+            atomic_write(self.store.root / "adapter-config.json", (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode())
+            log.info("M365 synchronization settings saved: enabled=%s control_port=%d", settings.enabled, settings.control_port)
+            return self.m365_settings()
 
     def invalidate(self):
         self.generation += 1
         self.catalog = None
         self.routes.clear()
         self.client.invalidate()
+        self.m365_catalog = None
 
     async def models(self, refresh: bool = False) -> list[dict]:
+        models, errors = [], []
+        providers = []
+        if self.credentials:
+            providers.append(("GitHub", self.github_models))
+        if self.m365_ready():
+            providers.append(("M365", self.m365_models))
+        for name, fetch in providers:
+            try:
+                models.extend(await fetch(refresh))
+            except (UpstreamError, aiohttp.ClientError, TimeoutError, ValueError) as error:
+                log.warning("%s model catalog unavailable: %s", name, safe_error(error))
+                errors.append(error)
+        if not models:
+            if errors:
+                raise errors[0]
+            raise UpstreamError(503, "Sign in to GitHub or M365 first.")
+        return models
+
+    async def github_models(self, refresh: bool = False) -> list[dict]:
         async with self.catalog_lock:
             if not refresh and self.catalog is not None and time.monotonic() - self.catalog_at < 300:
                 return deepcopy(self.catalog)
             if not self.credentials:
                 raise UpstreamError(503, "Sign in to GitHub first.")
-            generation = self.generation
+            generation = self.generation, self.github_generation
             models = await self.client.models(self.credentials["token"])
-            if generation != self.generation:
+            if generation != (self.generation, self.github_generation):
                 raise UpstreamError(503, "Network changed while refreshing models; retry.")
             overrides = {m["id"]: m for m in self.listener.models}
             self.catalog = [{**m, **deepcopy(overrides.get(m["id"], {}))} for m in models]
             self.catalog_at = time.monotonic()
+            log.info("GitHub model catalog refreshed: models=%d", len(self.catalog))
             return deepcopy(self.catalog)
 
+    async def m365_models(self, refresh: bool = False) -> list[dict]:
+        async with self.m365_catalog_lock:
+            auth = self.m365_auth()
+            if not self.m365_ready() or auth.profile is None:
+                raise UpstreamError(401, "M365 authorization is missing or expired; refresh it in the browser.")
+            key = auth.generation, self.generation
+            if (not refresh and self.m365_catalog is not None and key == self.m365_catalog_key
+                    and time.monotonic() - self.m365_catalog_at < 300):
+                return deepcopy(self.m365_catalog)
+            profile = auth.profile
+            try:
+                models = await self.m365_client.models(profile)
+            except UpstreamError as error:
+                self.reject_m365(error, profile)
+                raise
+            if key != (auth.generation, self.generation):
+                raise UpstreamError(503, "M365 authorization or network changed while refreshing models; retry.")
+            self.m365_catalog, self.m365_catalog_key = models, key
+            self.m365_catalog_at = time.monotonic()
+            log.info("M365 model catalog refreshed: models=%d", len(models))
+            return deepcopy(models)
+
+    def reject_m365(self, error: UpstreamError, profile):
+        auth = self.m365_auth()
+        if auth.profile != profile:
+            return
+        if error.status == 401:
+            auth.save(auth.enabled, auth.profile, True)
+            self.m365_catalog = None
+        auth.last_error = safe_error(error)
+
+    async def cancel_channel(self, channel: str):
+        current = asyncio.current_task()
+        pending = [task for task, value in self.active_channels.items() if value == channel and task is not current]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     async def _stop(self):
+        log.info("Stopping business listeners; active_requests=%d", len(self.active_requests))
         self.state = "stopping"
         self.invalidate()
         await self.network.replace(self.network.settings)
+        await self.m365_network.replace(self.m365_network.settings)
         current = asyncio.current_task()
         pending = [task for task in self.active_requests if task is not current]
         for task in pending:
@@ -122,7 +259,7 @@ class Runtime:
         if self.runner:
             await self.runner.cleanup()
             self.runner = None
-        self.state = "stopped" if self.credentials else "signed-out"
+        self.state = "stopped" if self.credentials or self.m365_ready() else "signed-out"
 
     async def _cancel_login(self):
         if self.login_task and not self.login_task.done():
@@ -133,6 +270,7 @@ class Runtime:
 
     async def start(self):
         async with self.lifecycle:
+            self.running_requested = True
             return await self._start()
 
     async def _start(self, settings: ListenerSettings | None = None):
@@ -146,19 +284,22 @@ class Runtime:
             proxy = self.configured_proxy(document)
             if proxy != self.network.settings:
                 await self.network.replace(proxy)
+                await self.m365_network.replace(proxy)
                 self.invalidate()
         if settings != self.listener:
             self.listener = settings
             self.invalidate()
-        if not self.credentials:
+        if not self.credentials and not self.m365_ready():
             self.state = "signed-out"
             return self.status()
         self.state, self.message = "starting", ""
-        runner = web.AppRunner(web.Application(client_max_size=16 * 1024 * 1024), access_log=None, shutdown_timeout=5)
+        runner = web.AppRunner(web.Application(client_max_size=16 * 1024 * 1024, middlewares=[request_logging]),
+                               access_log=None, shutdown_timeout=5)
+        runner.app.on_response_prepare.append(response_request_id)
         runner.app.router.add_route("*", "/{path:.*}", self.handle)
         try:
             await self.models()
-            if not self.credentials.get("username"):
+            if self.credentials and not self.credentials.get("username"):
                 username = await self._load_username(self.credentials["token"])
                 if username:
                     self.credentials = {**self.credentials, "username": username}
@@ -167,6 +308,8 @@ class Runtime:
                 await web.TCPSite(runner, self.listener.host, port).start()
             self.runner = runner
             self.state = "running"
+            log.info("Business listeners ready: host=%s port=%d bridge_port=%d",
+                     self.listener.host, self.listener.port, self.listener.bridge_port)
         except Exception as error:
             await runner.cleanup()
             self.state, self.message = "error", safe_error(error)
@@ -229,6 +372,7 @@ class Runtime:
 
     async def stop(self):
         async with self.lifecycle:
+            self.running_requested = False
             await self._cancel_login()
             await self._stop()
             return self.status()
@@ -238,9 +382,16 @@ class Runtime:
             if self.shutdown.is_set():
                 raise RuntimeError("Service is shutting down.")
             await self._cancel_login()
-            await self._stop()
+            if self.runner and self.m365_ready():
+                await self.cancel_channel("github")
+                await self.network.replace(self.network.settings)
+                self.catalog = None
+                self.client.invalidate()
+                self.github_generation += 1
+            else:
+                await self._stop()
             self.device = await self.client.begin_login()
-            self.state, self.login_state, self.message = "signing-in", "pending", ""
+            self.state, self.login_state, self.message = "running" if self.runner else "signing-in", "pending", ""
             self.login_task = asyncio.create_task(self._finish_login())
             return self.status()
 
@@ -252,12 +403,16 @@ class Runtime:
             if username:
                 credentials["username"] = username
             self.store.write("auth", credentials)
+            log.info("GitHub authorization completed.")
             self.credentials = credentials
-            self.invalidate()
-            self.state, self.login_state = "stopped", "complete"
+            self.catalog = None
+            self.routes.clear()
+            self.client.invalidate()
+            self.github_generation += 1
+            self.state, self.login_state = "running" if self.runner else "stopped", "complete"
         except (Exception, asyncio.CancelledError) as error:
             self.login_state = "failed"
-            self.state = "stopped" if self.credentials else "signed-out"
+            self.state = "running" if self.runner else "stopped" if self.credentials or self.m365_ready() else "signed-out"
             self.message = safe_error(error)
 
     async def _load_username(self, token: str) -> str | None:
@@ -271,10 +426,21 @@ class Runtime:
     async def logout(self):
         async with self.lifecycle:
             await self._cancel_login()
-            await self._stop()
+            keep_running = self.runner is not None and self.m365_ready()
+            if keep_running:
+                await self.cancel_channel("github")
+                await self.network.replace(self.network.settings)
+                self.catalog = None
+                self.routes.clear()
+                self.client.invalidate()
+                self.github_generation += 1
+            else:
+                await self._stop()
             self.store.delete("auth")
+            log.info("GitHub authorization removed.")
             self.credentials = self.device = None
-            self.state, self.login_state, self.message = "signed-out", "idle", ""
+            self.state = "running" if keep_running else "stopped" if self.m365_ready() else "signed-out"
+            self.login_state, self.message = "idle", ""
             return self.status()
 
     async def set_proxy(self, settings: ProxySettings):
@@ -286,14 +452,17 @@ class Runtime:
             await self._cancel_login()
             old = self.network.settings
             await self.network.replace(settings)
+            await self.m365_network.replace(settings)
             try:
                 atomic_write(self.store.root / "adapter-config.json", (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
             except Exception:
                 await self.network.replace(old)
+                await self.m365_network.replace(old)
                 raise
             self.invalidate()
+            log.info("Upstream proxy changed: type=%s", settings.type)
             self.message = ""
-            if self.credentials:
+            if self.credentials or self.m365_ready():
                 try:
                     await self.models(True)
                 except Exception as error:
@@ -307,6 +476,10 @@ class Runtime:
             if self.credentials:
                 models = await client.models(self.credentials["token"])
                 return {"message": f"Connection and authorization OK; {len(models)} chat models."}
+            profile = self.m365_auth().profile
+            if self.m365_ready() and profile is not None:
+                models = await M365Client(network).models(profile)
+                return {"message": f"Connection and authorization OK; {len(models)} chat models."}
             await client.json("GET", "https://api.github.com", headers={"user-agent": "Github-Copilot-Proxy"})
             return {"message": "GitHub connection OK. Sign in to verify Copilot access."}
         finally:
@@ -316,6 +489,47 @@ class Runtime:
         if self.shutdown.is_set():
             raise ValueError("Service is shutting down.")
         command = request.get("command")
+        if command == "logging-set":
+            return await self.set_logging(request.get("enabled"))
+        if command == "m365-settings-get":
+            return self.m365_settings()
+        if command == "m365-settings-set":
+            return await self.set_m365_settings(request.get("settings"))
+        if command in ("m365-connect", "m365-status", "m365-capture", "m365-disconnect", "m365-verify"):
+            if self._m365 is None:
+                self._m365 = M365Auth(self.store)
+            if command == "m365-connect":
+                log.info("M365 authorization connection requested.")
+                return self._m365.connect()
+            if command == "m365-status":
+                return self.status()["m365"]
+            if command == "m365-capture":
+                async with self.lifecycle:
+                    result = self._m365.capture(request.get("profile"), request.get("linkId"))
+                    log.info("M365 authorization received and saved.")
+                    self.m365_catalog = None
+                    if not self.runner:
+                        self.state = "stopped"
+                        if self.running_requested:
+                            try:
+                                await self._start()
+                            except (OSError, aiohttp.ClientError, UpstreamError, ValueError, TimeoutError) as error:
+                                log.warning("M365 authorization saved; service startup failed: %s", safe_error(error))
+                                return {**result, "message": safe_error(error)}
+                    return result
+            if command == "m365-disconnect":
+                async with self.lifecycle:
+                    if "linkId" in request:
+                        self._m365.check_link(request["linkId"])
+                    await self.cancel_channel("m365")
+                    await self.m365_network.replace(self.m365_network.settings)
+                    result = self._m365.disconnect()
+                    log.info("M365 authorization removed.")
+                    self.m365_catalog = None
+                    if not self.credentials:
+                        await self._stop()
+                    return result
+            return await self._m365.verify(self.network)
         if command == "status":
             return self.status()
         if command == "start":
@@ -356,7 +570,8 @@ class Runtime:
         try:
             if request.method == "GET" and request.path == "/v1/models":
                 models = await self.models()
-                return web.json_response({"object": "list", "data": [{"id": m["id"], "object": "model", "owned_by": "GitHub Copilot"} for m in models]})
+                return web.json_response({"object": "list", "data": [{"id": m["id"], "name": m.get("name", m["id"]),
+                                                                    "object": "model", "owned_by": m.get("owned_by", "GitHub Copilot")} for m in models]})
             port = request.transport.get_extra_info("sockname")[1]
             raw = request.path == "/v1/responses" and port == self.listener.bridge_port
             if request.method != "POST" or (request.path != "/v1/chat/completions" and not raw):
@@ -364,12 +579,42 @@ class Runtime:
             payload = await request.json()
             if not isinstance(payload, dict) or not isinstance(payload.get("model"), str):
                 raise ProtocolError("A model id and JSON object are required.")
-            model = next((m for m in await self.models() if m["id"] == payload["model"]), None)
+            channel = "m365" if payload["model"].startswith("m365/") else "github"
+            request[ROUTE_PROVIDER] = channel
+            self.active_channels[task] = channel
+            fetch_models = self.m365_models if channel == "m365" else self.github_models
+            model = next((m for m in await fetch_models() if m["id"] == payload["model"]), None)
             if model is None and time.monotonic() - self.forced_at >= 10:
                 self.forced_at = time.monotonic()
-                model = next((m for m in await self.models(True) if m["id"] == payload["model"]), None)
+                model = next((m for m in await fetch_models(True) if m["id"] == payload["model"]), None)
             if model is None:
                 raise ProtocolError("Model is not in the official Copilot catalog.")
+            request[ROUTE_MODEL] = model["id"]
+            if channel == "m365":
+                if raw:
+                    raise ProtocolError("M365 models support /v1/chat/completions, not /v1/responses.")
+                async with self.m365_rate_lock:
+                    await asyncio.sleep(max(0, self.m365_next_request - time.monotonic()))
+                    self.m365_next_request = time.monotonic() + self.request_interval
+                profile = self.m365_auth().profile
+                if profile is None or not self.m365_ready():
+                    raise UpstreamError(401, "M365 authorization is missing or expired.")
+                try:
+                    async with aclosing(self.m365_client.chat(profile, model, payload)) as chunks:
+                        if not payload.get("stream"):
+                            collected = [chunk async for chunk in chunks]
+                            return web.json_response(collect_chat(collected))
+                        first = await anext(chunks)
+                        stream = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+                        await stream.prepare(request)
+                        await self.write_event(stream, first)
+                        async for chunk in chunks:
+                            await self.write_event(stream, chunk)
+                        await self.write_event(stream, "[DONE]")
+                        return stream
+                except UpstreamError as error:
+                    self.reject_m365(error, profile)
+                    raise
             endpoints = model.get("supported_endpoints", [])
             responses = raw or "/responses" in endpoints or (not endpoints and model["id"] in self.routes)
             async with self.rate_lock:
@@ -416,6 +661,7 @@ class Runtime:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            request[API_FAILED] = True
             failure = {"error": {"message": safe_error(error), "type": "copilot_adapter_error"}}
             log.warning("API request failed: %s", safe_error(error))
             if stream is not None and stream.prepared:
@@ -429,6 +675,7 @@ class Runtime:
             return web.json_response(failure, status=status)
         finally:
             self.active_requests.discard(task)
+            self.active_channels.pop(task, None)
 
     @staticmethod
     async def write_event(stream, value):
@@ -436,8 +683,13 @@ class Runtime:
         await stream.write(f"data: {data}\n\n".encode())
 
     async def close(self):
-        await self.stop()
-        await self.network.close()
+        try:
+            await self.stop()
+            await self.network.close()
+            await self.m365_network.close()
+        finally:
+            if self.owns_log_manager:
+                self.log_manager.close()
 
 
 class ControlServer:
@@ -448,7 +700,8 @@ class ControlServer:
         self.connections = set()
 
     async def start(self):
-        self.server = await asyncio.start_server(self.handle, "127.0.0.1", 0, limit=65536)
+        port = M365Settings.load(self.runtime.store.root).control_port
+        self.server = await asyncio.start_server(self.handle, "127.0.0.1", port, limit=65536)
         self.runtime.store.write("control", {"port": self.server.sockets[0].getsockname()[1], "token": self.key, "pid": os.getpid(), "runtime": "python"})
 
     async def handle(self, reader, writer):
@@ -489,8 +742,10 @@ class ControlServer:
         self.runtime.store.delete("control")
 
 
-def control_request(store: UserStore, request: dict, timeout: float = 125) -> Any:
+def control_request(store: UserStore, request: dict, timeout: float = 125, *, expected_port: int = 0) -> Any:
     control = validate_control_record(store.read("control"))
+    if expected_port and control["port"] != expected_port:
+        raise ValueError("Control port does not match the running application. Use the same port or automatic discovery.")
     data = json.dumps({**request, "token": control["token"]}).encode() + b"\n"
     if len(data) > 65536:
         raise ValueError("Control request too large.")
@@ -518,21 +773,26 @@ async def serve(store: UserStore):
     lock = InstanceLock(store)
     if not lock.acquire():
         raise RuntimeError("This installation is already running.")
-    runtime = control = None
     try:
-        runtime = Runtime(store)
-        control = ControlServer(runtime)
-        await control.start()
-        try:
-            await runtime.start()
-        except Exception as error:
-            log.error("Startup failed: %s", safe_error(error))
-        await runtime.shutdown.wait()
+        with runtime_logging(store, LoggingSettings.load(store.root).enabled) as logs:
+            runtime = control = None
+            log.info("Gateway process starting: pid=%d log_file=%s", os.getpid(), logs.path)
+            try:
+                runtime = Runtime(store, log_manager=logs)
+                control = ControlServer(runtime)
+                await control.start()
+                try:
+                    await runtime.start()
+                except Exception as error:
+                    log.error("Startup failed: %s", safe_error(error))
+                await runtime.shutdown.wait()
+            finally:
+                try:
+                    if runtime:
+                        await runtime.close()
+                    if control:
+                        await control.close()
+                finally:
+                    log.info("Gateway process stopped.")
     finally:
-        try:
-            if runtime:
-                await runtime.close()
-            if control:
-                await control.close()
-        finally:
-            lock.close()
+        lock.close()

@@ -149,6 +149,8 @@ def remove_startup(store: UserStore):
 
 
 def clean_installation(store: UserStore):
+    from .m365_copilot.native_host import unregister
+    unregister(store)
     remove_startup(store)
     store.remove_all()
     (store.root / "adapter-config.json").unlink(missing_ok=True)

@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Copilot Proxy · M365 授权",
+  "version": "0.1.0",
+  "description": "将当前浏览器中的 M365 Copilot 授权同步到本地网关，无需配对码。",
+  "permissions": ["nativeMessaging", "webRequest", "storage", "alarms", "scripting"],
+  "host_permissions": [
+    "https://*.cloud.microsoft/*",
+    "https://*.microsoft365.com/*",
+    "https://*.office.com/*",
+    "https://*.copilot.com/*",
+    "https://copilot.microsoft.com/*",
+    "https://substrate.svc.cloud.microsoft/*"
+  ],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "popup.html", "default_title": "M365 Copilot 授权状态"}
+}

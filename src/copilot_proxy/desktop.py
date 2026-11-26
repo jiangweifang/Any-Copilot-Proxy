@@ -377,6 +377,94 @@ class ListenerDialog(QDialog):
         self.render_message()
 
 
+class M365Dialog(QDialog):
+    applied = Signal()
+
+    def __init__(self, store, parent):
+        super().__init__(parent)
+        self.language = parent.language
+        self.active_port = 0
+        self.busy = False
+        self.loaded = False
+        self.raw_message = ""
+        self.saved = False
+        self.resize(540, 320)
+        self.dispatch = Dispatcher(store, self)
+        self.dispatch.result.connect(self.completed)
+        self.dispatch.error.connect(self.failed)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 25, 28, 25)
+        layout.setSpacing(16)
+        self.description = label("", "muted")
+        layout.addWidget(self.description)
+        self.form = QFormLayout()
+        self.port = QSpinBox()
+        self.port.setRange(0, 65535)
+        self.form.addRow(tr(self.language, "m365_control_port"), self.port)
+        layout.addLayout(self.form)
+        self.active = label("", "muted")
+        self.message = label()
+        layout.addWidget(self.active)
+        layout.addWidget(self.message)
+        buttons = QHBoxLayout()
+        self.save, self.cancel = QPushButton(), QPushButton()
+        self.save.setObjectName("primary")
+        self.save.setEnabled(False)
+        self.save.clicked.connect(self.submit)
+        self.cancel.clicked.connect(self.reject)
+        buttons.addWidget(self.save)
+        buttons.addWidget(self.cancel)
+        layout.addLayout(buttons)
+        parent.language_changed.connect(self.retranslate)
+        self.retranslate(self.language)
+        self.dispatch.request("m365-settings-get", {"command": "m365-settings-get"})
+
+    def reject(self):
+        if not self.busy:
+            super().reject()
+
+    def submit(self):
+        if self.busy or not self.loaded or not confirm(self, self.language, "m365_settings", "m365_port_confirm"):
+            return
+        self.busy = True
+        self.save.setEnabled(False)
+        self.port.setEnabled(False)
+        self.dispatch.request("m365-settings-set", {"command": "m365-settings-set", "settings": {"controlPort": self.port.value()}})
+
+    @Slot(str, object)
+    def completed(self, command, result):
+        self.active_port = result["activeControlPort"]
+        self.port.setValue(result["controlPort"])
+        self.loaded, self.busy = True, False
+        self.saved = command == "m365-settings-set"
+        self.raw_message = ""
+        self.save.setEnabled(True)
+        self.port.setEnabled(True)
+        self.retranslate(self.language)
+        if self.saved:
+            self.applied.emit()
+
+    @Slot(str, str)
+    def failed(self, command, error):
+        self.busy = False
+        self.raw_message, self.saved = error, False
+        self.save.setEnabled(self.loaded)
+        self.port.setEnabled(True)
+        self.retranslate(self.language)
+
+    @Slot(str)
+    def retranslate(self, language):
+        self.language = language
+        self.setWindowTitle(tr(language, "m365_settings"))
+        self.description.setText(tr(language, "m365_port_description"))
+        self.form.labelForField(self.port).setText(tr(language, "m365_control_port"))
+        self.active.setText(tr(language, "m365_active_port", port=self.active_port))
+        self.save.setText(tr(language, "save"))
+        self.cancel.setText(tr(language, "cancel"))
+        self.message.setText(localize_message(language, self.raw_message) if self.raw_message else
+                             tr(language, "m365_port_saved") if self.saved else "")
+
+
 class MainWindow(QMainWindow):
     language_changed = Signal(str)
 
@@ -389,6 +477,8 @@ class MainWindow(QMainWindow):
         self.authenticated = False
         self.service_busy = False
         self.startup_busy = False
+        self.m365_busy = False
+        self.logging_busy = False
         self.startup_enabled = None
         self.desktop_lock = None
         self.manager_thread = None
@@ -405,7 +495,7 @@ class MainWindow(QMainWindow):
         self.dispatch.error.connect(self.failed)
         self.setWindowTitle("Github Copilot Proxy")
         self.setWindowIcon(app_icon())
-        self.resize(880, 640)
+        self.resize(880, 740)
         self.setMinimumSize(740, 550)
         root = QWidget()
         self.setCentralWidget(root)
@@ -465,6 +555,17 @@ class MainWindow(QMainWindow):
         for button in (self.login_button, self.logout_button, self.proxy_button, self.listener_button):
             row.addWidget(button)
         layout.addLayout(row)
+        m365_row = QHBoxLayout()
+        self.m365_switch = QCheckBox()
+        self.m365_switch.setEnabled(False)
+        self.m365_account = label("", "muted")
+        self.m365_button = QPushButton()
+        m365_row.addWidget(self.m365_switch)
+        m365_row.addWidget(self.m365_account, 1)
+        m365_row.addWidget(self.m365_button)
+        layout.addLayout(m365_row)
+        self.m365_switch.clicked.connect(self.toggle_m365)
+        self.m365_button.clicked.connect(self.show_m365)
         self.device_code = QLineEdit()
         self.device_code.setReadOnly(True)
         self.device_code.setPlaceholderText("Your device code will appear here")
@@ -483,6 +584,11 @@ class MainWindow(QMainWindow):
         self.remove_button = QPushButton("Uninstall")
         self.remove_button.setObjectName("danger")
         footer.addWidget(self.setup_button)
+        self.logging_switch = QCheckBox()
+        self.logging_switch.setEnabled(False)
+        self.logs_button = QPushButton()
+        footer.addWidget(self.logging_switch)
+        footer.addWidget(self.logs_button)
         footer.addStretch()
         footer.addWidget(self.remove_button)
         layout.addLayout(footer)
@@ -496,6 +602,8 @@ class MainWindow(QMainWindow):
         self.listener_button.clicked.connect(self.show_listener)
         self.setup_button.clicked.connect(self.setup)
         self.remove_button.clicked.connect(self.uninstall)
+        self.logging_switch.clicked.connect(self.toggle_logging)
+        self.logs_button.clicked.connect(self.open_logs)
         self.open_browser.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/login/device")))
         self.cancel_login.clicked.connect(lambda: self.request("cancel-login"))
         self.tray = None
@@ -588,8 +696,38 @@ class MainWindow(QMainWindow):
         dialog.applied.connect(lambda result: self.completed("listener-set", result))
         dialog.exec()
 
+    def show_m365(self):
+        dialog = M365Dialog(self.store, self)
+        dialog.setStyleSheet(STYLE)
+        dialog.applied.connect(lambda: self.request("status"))
+        dialog.exec()
+
+    def toggle_m365(self, enabled):
+        self.m365_busy = True
+        self.m365_switch.setEnabled(False)
+        self.dispatch.request("m365-settings-set", {"command": "m365-settings-set", "settings": {"enabled": enabled}})
+
+    def toggle_logging(self, enabled):
+        self.logging_busy = True
+        self.logging_switch.setEnabled(False)
+        self.dispatch.request("logging-set", {"command": "logging-set", "enabled": enabled})
+
+    def open_logs(self):
+        directory = self.store.directory / "logs"
+        if not directory.is_dir():
+            inform(self, self.language, "open_logs", "logs_not_created")
+        elif not QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory))):
+            self.set_message(tr(self.language, "logs_open_failed"))
+
     @Slot(str, object)
     def completed(self, command, result):
+        if command == "logging-set":
+            self.logging_busy = False
+        if command == "m365-settings-set":
+            self.m365_busy = False
+            self.m365_switch.setChecked(result["enabled"])
+            self.request("status")
+            return
         if command in ("startup-status", "startup", "startup-enable", "startup-disable"):
             if command == "startup-status" and self.startup_busy:
                 return
@@ -619,7 +757,7 @@ class MainWindow(QMainWindow):
         if command in ("start", "stop"):
             self.service_busy = False
         self.render_status()
-        self.authenticated = result["authenticated"]
+        self.authenticated = result.get("githubAuthenticated", result["authenticated"])
         pending = result["loginState"] == "pending"
         self.logout_button.setVisible(self.authenticated)
         self.logout_button.setEnabled(self.authenticated)
@@ -640,6 +778,12 @@ class MainWindow(QMainWindow):
     def failed(self, command, error):
         self.set_message(error, source=command)
         connection_failed = command == "status" or error in CONTROL_CONNECTION_ERRORS
+        if command == "m365-settings-set":
+            self.m365_busy = False
+            self.render_m365_controls()
+        if command == "logging-set":
+            self.logging_busy = False
+            self.render_logging_controls()
         if connection_failed:
             self.manager_connected = False
             self.authenticated = False
@@ -724,7 +868,7 @@ class MainWindow(QMainWindow):
         elif self.last_status:
             if self.last_status["loginState"] == "pending":
                 account_text = tr(self.language, "signing-in")
-            elif self.last_status["authenticated"]:
+            elif self.last_status.get("githubAuthenticated", self.last_status["authenticated"]):
                 username = self.last_status.get("username")
                 account_text = tr(self.language, "signed_in_as", username=username) if username else tr(self.language, "login_success")
             else:
@@ -738,6 +882,22 @@ class MainWindow(QMainWindow):
             self.detail.setText(tr(self.language, "checking"))
         self.render_service_controls()
         self.render_startup_controls()
+        self.render_m365_controls()
+        self.render_logging_controls()
+
+    def render_logging_controls(self):
+        settings = (self.last_status or {}).get("logging")
+        self.logging_switch.setEnabled(self.manager_connected and settings is not None and not self.logging_busy)
+        if settings is not None and not self.logging_busy:
+            self.logging_switch.setChecked(settings["enabled"])
+
+    def render_m365_controls(self):
+        settings = (self.last_status or {}).get("m365")
+        self.m365_switch.setEnabled(self.manager_connected and settings is not None and not self.m365_busy)
+        self.m365_button.setEnabled(self.manager_connected and not self.m365_busy)
+        if settings is not None and not self.m365_busy:
+            self.m365_switch.setChecked(settings["syncEnabled"])
+        self.m365_account.setText(settings.get("username") or tr(self.language, "signed-out") if settings else "")
 
     def render_service_controls(self):
         state = self.badge_code
@@ -787,6 +947,12 @@ class MainWindow(QMainWindow):
                             ("enable_startup", self.enable_startup_button), ("disable_startup", self.disable_startup_button),
                             ("listener", self.listener_button)):
             button.setText(tr(self.language, key))
+        self.m365_switch.setText(tr(self.language, "m365_sync"))
+        self.m365_switch.setToolTip(tr(self.language, "m365_sync_hint"))
+        self.m365_button.setText(tr(self.language, "m365_settings"))
+        self.logging_switch.setText(tr(self.language, "runtime_logs"))
+        self.logging_switch.setToolTip(tr(self.language, "runtime_logs_hint"))
+        self.logs_button.setText(tr(self.language, "open_logs"))
         self.enable_startup_button.setToolTip(tr(self.language, "startup_tooltip"))
         self.disable_startup_button.setToolTip(tr(self.language, "startup_tooltip"))
         self.device_code.setPlaceholderText(tr(self.language, "device_placeholder"))

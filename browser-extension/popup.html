@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>M365 Copilot 授权</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body data-tone="muted">
+  <main>
+    <header class="hero">
+      <div class="connection" aria-label="M365 Copilot 连接本地网关">
+        <div class="endpoint">
+          <div class="m365-mark" aria-hidden="true">
+            <img src="assets/m365-copilot.png" width="78" height="77" alt="">
+            <span id="token-badge" class="token-badge" hidden>!</span>
+          </div>
+          <span class="endpoint-name">M365 Copilot</span>
+        </div>
+        <svg class="signal" viewBox="0 0 64 64" aria-hidden="true">
+          <circle cx="10" cy="32" r="4" fill="currentColor" stroke="none"/>
+          <path class="wave wave-one" d="M22 23a13 13 0 0 1 0 18"/>
+          <path class="wave wave-two" d="M32 15a24 24 0 0 1 0 34"/>
+          <path class="wave wave-three" d="M42 7a35 35 0 0 1 0 50"/>
+        </svg>
+        <div class="endpoint">
+          <div class="proxy-mark" aria-hidden="true">
+            <svg viewBox="0 0 80 80">
+              <rect x="10" y="12" width="60" height="24" rx="6"/>
+              <rect x="10" y="44" width="60" height="24" rx="6"/>
+              <path d="M22 24h18M22 56h18"/>
+              <circle cx="57" cy="24" r="3"/>
+              <circle cx="57" cy="56" r="3"/>
+            </svg>
+          </div>
+          <span class="endpoint-name">本地网关</span>
+        </div>
+      </div>
+      <h1 id="heading">正在检查连接</h1>
+      <p id="subtitle" class="subtitle">正在读取本地网关和授权状态…</p>
+    </header>
+
+    <dl class="status-card" aria-label="授权状态">
+      <div class="status-row"><dt>账号</dt><dd id="account-status" data-tone="muted"><span class="dot"></span><span id="account-text">读取中</span></dd></div>
+      <div class="status-row"><dt>令牌</dt><dd id="token-status" data-tone="muted"><span class="dot"></span><span id="token-text">读取中</span></dd></div>
+      <div class="status-row"><dt>本地网关</dt><dd id="gateway-status" data-tone="muted"><span class="dot"></span><span id="gateway-text">连接中</span></dd></div>
+      <div class="status-row"><dt>续期</dt><dd id="renewal-status" data-tone="muted"><span class="dot"></span><span id="renewal-text">尚未开始</span></dd></div>
+    </dl>
+
+    <section class="actions" aria-label="授权操作">
+      <button id="primary" class="primary" disabled>正在检查…</button>
+      <div class="secondary-actions">
+        <button id="copy" disabled title="获取有效令牌后可复制">复制令牌</button>
+        <button id="open">打开 M365 Copilot</button>
+      </div>
+      <p id="notice" class="notice" role="status" aria-live="polite" hidden></p>
+    </section>
+
+    <footer>
+      <button id="disconnect" class="text-button" disabled>断开本地授权</button>
+      <p id="captured" class="captured">尚未获取授权</p>
+      <p class="preview-note">本地授权 · 双渠道网关</p>
+      <details class="settings">
+        <summary>连接设置</summary>
+        <p>请将下方扩展 ID 注册到本项目。授权获取不要求启动聊天网关，无需配对码。</p>
+        <code id="extension-id"></code>
+        <label for="control-port">主程序管理端口（0 = 自动发现）</label>
+        <input id="control-port" type="number" min="0" max="65535" step="1" value="0">
+        <p>使用固定端口时，请与主程序一致。主程序的端口修改需重启后生效；原生浏览器通信本身不另开 HTTP 端口。</p>
+        <button id="save-port" class="text-button">保存端口并检查</button>
+        <button id="refresh" class="text-button">重新检查连接</button>
+      </details>
+    </footer>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

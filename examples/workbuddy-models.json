@@ -1,0 +1,86 @@
+[
+  {
+    "id": "m365/Chat",
+    "name": "M365 · 快速响应",
+    "vendor": "M365 Copilot",
+    "apiKey": "unused",
+    "url": "http://127.0.0.1:4140/v1/chat/completions",
+    "maxInputTokens": 128000,
+    "maxOutputTokens": 16000,
+    "supportsToolCall": true,
+    "supportsImages": true,
+    "supportsReasoning": false
+  },
+  {
+    "id": "m365/Magic",
+    "name": "M365 · 自动",
+    "vendor": "M365 Copilot",
+    "apiKey": "unused",
+    "url": "http://127.0.0.1:4140/v1/chat/completions",
+    "maxInputTokens": 128000,
+    "maxOutputTokens": 16000,
+    "supportsToolCall": true,
+    "supportsImages": true,
+    "supportsReasoning": false
+  },
+  {
+    "id": "m365/Claude_Sonnet@paid",
+    "name": "M365 · Claude Sonnet 5.5（订阅）",
+    "vendor": "M365 Copilot",
+    "apiKey": "unused",
+    "url": "http://127.0.0.1:4140/v1/chat/completions",
+    "maxInputTokens": 128000,
+    "maxOutputTokens": 16000,
+    "supportsToolCall": true,
+    "supportsImages": true,
+    "supportsReasoning": false
+  },
+  {
+    "id": "m365/Claude_Container@paid",
+    "name": "M365 · Claude Opus 5.5（订阅）",
+    "vendor": "M365 Copilot",
+    "apiKey": "unused",
+    "url": "http://127.0.0.1:4140/v1/chat/completions",
+    "maxInputTokens": 128000,
+    "maxOutputTokens": 16000,
+    "supportsToolCall": true,
+    "supportsImages": true,
+    "supportsReasoning": false
+  },
+  {
+    "id": "m365/Claude_Fable@paid",
+    "name": "M365 · Claude Fable 5.1（订阅）",
+    "vendor": "M365 Copilot",
+    "apiKey": "unused",
+    "url": "http://127.0.0.1:4140/v1/chat/completions",
+    "maxInputTokens": 128000,
+    "maxOutputTokens": 16000,
+    "supportsToolCall": true,
+    "supportsImages": true,
+    "supportsReasoning": false
+  },
+  {
+    "id": "m365/Gpt_62_Astra_Reasoning@paid",
+    "name": "M365 · GPT-6.2 Astra（订阅）",
+    "vendor": "M365 Copilot",
+    "apiKey": "unused",
+    "url": "http://127.0.0.1:4140/v1/chat/completions",
+    "maxInputTokens": 128000,
+    "maxOutputTokens": 16000,
+    "supportsToolCall": true,
+    "supportsImages": true,
+    "supportsReasoning": false
+  },
+  {
+    "id": "m365/Gpt_62_Sol_Reasoning@paid",
+    "name": "M365 · GPT-6.2 Sol（订阅）",
+    "vendor": "M365 Copilot",
+    "apiKey": "unused",
+    "url": "http://127.0.0.1:4140/v1/chat/completions",
+    "maxInputTokens": 128000,
+    "maxOutputTokens": 16000,
+    "supportsToolCall": true,
+    "supportsImages": true,
+    "supportsReasoning": false
+  }
+]

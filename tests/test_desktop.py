@@ -9,7 +9,7 @@ from unittest.mock import patch
 try:
     from PySide6.QtWidgets import QApplication, QLineEdit, QMessageBox
     from PySide6.QtTest import QTest
-    from copilot_proxy.desktop import Dispatcher, ListenerDialog, MainWindow, ProxyDialog
+    from copilot_proxy.desktop import Dispatcher, ListenerDialog, M365Dialog, MainWindow, ProxyDialog
     from copilot_proxy.config import UserStore
     from copilot_proxy.runtime import CONTROL_UNAVAILABLE
     HAS_QT = True
@@ -22,6 +22,53 @@ class DesktopTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+
+    def test_logging_switch_applies_live_and_pending_status_does_not_revert_the_click(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request") as request:
+            window = MainWindow(UserStore(Path(directory)), testing=True)
+            status = {"state": "running", "baseUrl": "http://127.0.0.1:4140/v1", "authenticated": True,
+                      "loginState": "idle", "message": "", "deviceCode": None,
+                      "logging": {"enabled": True, "active": True}}
+            window.completed("status", status)
+            self.assertEqual(window.logging_switch.text(), "记录运行日志")
+            self.assertTrue(window.logging_switch.isChecked())
+            window.logging_switch.click()
+            self.assertEqual(request.call_args.args[1], {"command": "logging-set", "enabled": False})
+            window.completed("status", status)
+            self.assertFalse(window.logging_switch.isChecked())
+            self.assertFalse(window.logging_switch.isEnabled())
+            window.completed("logging-set", {**status, "logging": {"enabled": False, "active": False}})
+            self.assertFalse(window.logging_switch.isChecked())
+            self.assertTrue(window.logging_switch.isEnabled())
+            self.assertEqual(window.badge.text(), "运行中")
+            window.close()
+            window.deleteLater()
+
+    def test_m365_switch_preserves_login_and_port_dialog_does_not_replace_dashboard(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request") as request:
+            window = MainWindow(UserStore(Path(directory)), testing=True)
+            status = {"state": "running", "baseUrl": "http://127.0.0.1:4140/v1", "authenticated": True,
+                      "loginState": "idle", "message": "", "deviceCode": None,
+                      "m365": {"syncEnabled": True, "username": "name@example.invalid"}}
+            window.completed("status", status)
+            self.assertTrue(window.m365_switch.isChecked())
+            self.assertEqual(window.m365_account.text(), "name@example.invalid")
+            window.m365_switch.click()
+            self.assertEqual(request.call_args.args[1], {"command": "m365-settings-set", "settings": {"enabled": False}})
+            self.assertTrue(window.authenticated)
+            dialog = M365Dialog(window.store, window)
+            dialog.completed("m365-settings-get", {"enabled": False, "controlPort": 0, "activeControlPort": 43210})
+            self.assertEqual(window.badge.text(), "运行中")
+            self.assertIn("43210", dialog.active.text())
+            dialog.port.setValue(43211)
+            with patch("copilot_proxy.desktop.confirm", return_value=True):
+                dialog.submit()
+            self.assertEqual(request.call_args.args[1]["settings"], {"controlPort": 43211})
+            dialog.completed("m365-settings-set", {"enabled": False, "controlPort": 43211, "activeControlPort": 43210})
+            self.assertIn("重启", dialog.message.text())
+            for widget in (dialog, window):
+                widget.close()
+                widget.deleteLater()
 
     def test_open_proxy_dialogs_do_not_shadow_dashboard_status(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(Dispatcher, "request"):

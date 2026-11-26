@@ -58,7 +58,7 @@ async def login_local(runtime: Runtime):
 async def dispatch(command: str, store: UserStore, request: dict):
     if command == "logout":
         try:
-            answer = input("Sign out and stop this tool's active requests? [y/N]: ")
+            answer = input("Sign out of GitHub and stop its active requests? [y/N]: ")
         except EOFError:
             answer = ""
         if answer.strip().lower() not in ("y", "yes"):

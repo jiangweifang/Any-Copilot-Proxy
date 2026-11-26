@@ -58,6 +58,8 @@ class ListenerSettings:
         ports = [data.get("port", 4140), data.get("bridgePort", 4141)]
         if any(type(p) is not int or not 1 <= p <= 65535 for p in ports) or ports[0] == ports[1]:
             raise ValueError("Ports must be distinct integers between 1 and 65535.")
+        M365Settings.from_data(data)
+        LoggingSettings.from_data(data)
         models = data.get("models", [])
         if not isinstance(models, list) or any(not isinstance(m, dict) or not isinstance(m.get("id"), str) or not m["id"].strip() for m in models):
             raise ValueError("Model overrides must be objects with an id.")
@@ -70,6 +72,44 @@ class ListenerSettings:
     @property
     def base_url(self) -> str:
         return f"http://{self.address}:{self.port}/v1"
+
+
+@dataclass(frozen=True)
+class LoggingSettings:
+    enabled: bool = True
+
+    @classmethod
+    def load(cls, root: Path) -> LoggingSettings:
+        return cls.from_data(read_project_config(root))
+
+    @classmethod
+    def from_data(cls, document: dict) -> LoggingSettings:
+        data = document.get("logging", {})
+        if not isinstance(data, dict) or type(data.get("enabled", True)) is not bool:
+            raise ValueError("Logging settings require a boolean enabled field.")
+        return cls(data.get("enabled", True))
+
+
+@dataclass(frozen=True)
+class M365Settings:
+    enabled: bool = True
+    control_port: int = 0
+
+    @classmethod
+    def load(cls, root: Path) -> M365Settings:
+        return cls.from_data(read_project_config(root))
+
+    @classmethod
+    def from_data(cls, document: dict) -> M365Settings:
+        data = document.get("m365", {})
+        if not isinstance(data, dict) or type(data.get("enabled", True)) is not bool:
+            raise ValueError("M365 synchronization settings require a boolean enabled field.")
+        port = data.get("controlPort", 0)
+        if type(port) is not int or not 0 <= port <= 65535:
+            raise ValueError("Control port must be 0 (automatic) or an integer between 1 and 65535.")
+        if port and port in (document.get("port", 4140), document.get("bridgePort", 4141)):
+            raise ValueError("Control port must differ from the API ports.")
+        return cls(data.get("enabled", True), port)
 
 
 @dataclass(frozen=True)
