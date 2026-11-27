@@ -59,6 +59,7 @@ class ListenerSettings:
         if any(type(p) is not int or not 1 <= p <= 65535 for p in ports) or ports[0] == ports[1]:
             raise ValueError("Ports must be distinct integers between 1 and 65535.")
         M365Settings.from_data(data)
+        AntigravitySettings.from_data(data)
         LoggingSettings.from_data(data)
         models = data.get("models", [])
         if not isinstance(models, list) or any(not isinstance(m, dict) or not isinstance(m.get("id"), str) or not m["id"].strip() for m in models):
@@ -110,6 +111,33 @@ class M365Settings:
         if port and port in (document.get("port", 4140), document.get("bridgePort", 4141)):
             raise ValueError("Control port must differ from the API ports.")
         return cls(data.get("enabled", True), port)
+
+
+@dataclass(frozen=True)
+class AntigravitySettings:
+    enabled: bool = False
+    binary_path: str = ""
+    profile_mode: str = "shared"
+
+    @classmethod
+    def load(cls, root: Path) -> AntigravitySettings:
+        return cls.from_data(read_project_config(root))
+
+    @classmethod
+    def from_data(cls, document: dict) -> AntigravitySettings:
+        data = document.get("antigravity", {})
+        if not isinstance(data, dict):
+            raise ValueError("Antigravity settings must be an object.")
+        enabled = data.get("enabled", False)
+        if type(enabled) is not bool:
+            raise ValueError("Antigravity settings require a boolean enabled field.")
+        binary_path = data.get("binaryPath", "")
+        if not isinstance(binary_path, str) or "\x00" in binary_path:
+            raise ValueError("Antigravity binaryPath must be a valid path string.")
+        profile_mode = data.get("profileMode", "shared")
+        if profile_mode not in ("shared", "isolated"):
+            raise ValueError("Antigravity profileMode must be 'shared' or 'isolated'.")
+        return cls(enabled, binary_path.strip(), profile_mode)
 
 
 @dataclass(frozen=True)

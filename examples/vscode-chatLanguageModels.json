@@ -69,5 +69,94 @@
         "maxOutputTokens": 16000
       }
     ]
+  },
+  {
+    "name": "Google Antigravity",
+    "vendor": "customendpoint",
+    "apiKey": "unused",
+    "apiType": "chat-completions",
+    "models": [
+      {
+        "id": "agy/gemini-4-neon-high",
+        "name": "Antigravity · Gemini 4 Neon (High)",
+        "url": "http://127.0.0.1:4140/v1/chat/completions",
+        "toolCalling": true,
+        "vision": true,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 16000
+      },
+      {
+        "id": "agy/gemini-4-neon-medium",
+        "name": "Antigravity · Gemini 4 Neon (Medium)",
+        "url": "http://127.0.0.1:4140/v1/chat/completions",
+        "toolCalling": true,
+        "vision": true,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 16000
+      },
+      {
+        "id": "agy/gemini-4-carbon-high",
+        "name": "Antigravity · Gemini 4 Carbon (High)",
+        "url": "http://127.0.0.1:4140/v1/chat/completions",
+        "toolCalling": true,
+        "vision": true,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 16000
+      },
+      {
+        "id": "agy/gemini-4-argon-high",
+        "name": "Antigravity · Gemini 4 Argon (High)",
+        "url": "http://127.0.0.1:4140/v1/chat/completions",
+        "toolCalling": true,
+        "vision": true,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 16000
+      },
+      {
+        "id": "agy/gemini-4-hydrogen-high",
+        "name": "Antigravity · Gemini 4 Hydrogen (High)",
+        "url": "http://127.0.0.1:4140/v1/chat/completions",
+        "toolCalling": true,
+        "vision": true,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 16000
+      },
+      {
+        "id": "agy/gemini-3.8-flash-medium",
+        "name": "Antigravity · Gemini 3.8 Flash (Medium)",
+        "url": "http://127.0.0.1:4140/v1/chat/completions",
+        "toolCalling": true,
+        "vision": true,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 16000
+      },
+      {
+        "id": "agy/claude-opus-5-5-high",
+        "name": "Antigravity · Claude Opus 5.5 (High)",
+        "url": "http://127.0.0.1:4140/v1/chat/completions",
+        "toolCalling": true,
+        "vision": true,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 16000
+      },
+      {
+        "id": "agy/claude-sonnet-5-5-high",
+        "name": "Antigravity · Claude Sonnet 5.5 (High)",
+        "url": "http://127.0.0.1:4140/v1/chat/completions",
+        "toolCalling": true,
+        "vision": true,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 16000
+      },
+      {
+        "id": "agy/gpt-oss-120b-medium",
+        "name": "Antigravity · GPT-OSS 120B (Medium)",
+        "url": "http://127.0.0.1:4140/v1/chat/completions",
+        "toolCalling": true,
+        "vision": true,
+        "maxInputTokens": 128000,
+        "maxOutputTokens": 16000
+      }
+    ]
   }
 ]

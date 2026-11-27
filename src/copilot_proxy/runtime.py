@@ -15,18 +15,19 @@ from typing import Any
 import aiohttp
 from aiohttp import web
 
-from .config import InstanceLock, ListenerSettings, LoggingSettings, M365Settings, ProxySettings, UserStore, atomic_write, read_project_config
+from .antigravity import AntigravityAuth, AntigravityClient, AntigravityInstaller
+from .chat_bridge import collect_chat
+from .config import AntigravitySettings, InstanceLock, ListenerSettings, LoggingSettings, M365Settings, ProxySettings, UserStore, atomic_write, read_project_config
 from .network import Network, UpstreamError
 from .github_copilot.client import CopilotClient
 from .m365_copilot.auth import M365Auth
 from .m365_copilot.client import M365Client
-from .m365_copilot.protocol import collect_chat
 from .logging_setup import API_FAILED, ROUTE_MODEL, ROUTE_PROVIDER, RuntimeLog, request_logging, response_request_id, runtime_logging
 from .protocol import ProtocolError, ResponseStream, read_events, to_chat, to_responses
 
 log = logging.getLogger(__name__)
 
-CONTROL_UNAVAILABLE = "Cannot connect to Github Copilot Proxy. The service state is unknown."
+CONTROL_UNAVAILABLE = "Cannot connect to Copilot Proxy. The service state is unknown."
 CONTROL_LEGACY = "Control data belongs to the legacy Node version. Confirm that version has exited before restarting."
 CONTROL_INVALID = "Service control data is invalid or incompatible. Check this installation's data directory."
 CONTROL_CONNECTION_ERRORS = (CONTROL_UNAVAILABLE, CONTROL_LEGACY, CONTROL_INVALID)
@@ -59,7 +60,9 @@ def safe_error(error: BaseException) -> str:
 
 class Runtime:
     def __init__(self, store: UserStore, *, client: CopilotClient | None = None,
-                 m365_client: M365Client | None = None, request_interval: float = 3, log_manager: RuntimeLog | None = None):
+                 m365_client: M365Client | None = None, agy_client: AntigravityClient | None = None,
+                 agy_auth: AntigravityAuth | None = None, agy_installer: AntigravityInstaller | None = None,
+                 request_interval: float = 3, log_manager: RuntimeLog | None = None):
         self.store = store
         self.log_manager = log_manager or RuntimeLog(store)
         self.owns_log_manager = log_manager is None
@@ -68,9 +71,12 @@ class Runtime:
         self.client = client or CopilotClient(self.network)
         self.m365_network = m365_client.network if m365_client else Network(self.network.settings)
         self.m365_client = m365_client or M365Client(self.m365_network)
+        self.agy_client = agy_client or AntigravityClient(store)
+        self.agy_installer = agy_installer or AntigravityInstaller()
         self.credentials = store.read("auth")
         self._m365: M365Auth | None = None
-        self.state = "stopped" if self.credentials or self.m365_ready() else "signed-out"
+        self._agy: AntigravityAuth | None = agy_auth
+        self.state = "stopped" if self.any_channel_ready() else "signed-out"
         self.message = ""
         self.runner = None
         self.catalog = None
@@ -83,6 +89,14 @@ class Runtime:
         self.m365_catalog_lock = asyncio.Lock()
         self.m365_rate_lock = asyncio.Lock()
         self.m365_next_request = 0.0
+        self.agy_catalog = None
+        self.agy_catalog_at = 0.0
+        self.agy_catalog_key = None
+        self.agy_catalog_lock = asyncio.Lock()
+        self.agy_rate_lock = asyncio.Lock()
+        self.agy_next_request = 0.0
+        self.agy_login_task = None
+        self.agy_install_task = None
         self.lifecycle = asyncio.Lock()
         self.rate_lock = asyncio.Lock()
         self.next_request = 0.0
@@ -109,18 +123,36 @@ class Runtime:
     def m365_ready(self) -> bool:
         return self.m365_auth().status()["state"] == "captured"
 
+    def agy_settings(self) -> AntigravitySettings:
+        return AntigravitySettings.load(self.store.root)
+
+    def agy_auth(self) -> AntigravityAuth:
+        if self._agy is None:
+            self._agy = AntigravityAuth(self.store)
+        return self._agy
+
+    def agy_ready(self) -> bool:
+        return self.agy_auth().ready(self.agy_settings())
+
+    def any_channel_ready(self) -> bool:
+        return bool(self.credentials) or self.m365_ready() or self.agy_ready()
+
     def status(self) -> dict:
         m365 = self.m365_auth().status()
         m365["chatReady"] = m365["state"] == "captured" and self.runner is not None
+        agy = self.agy_auth().status(self.agy_settings())
+        agy["chatReady"] = agy["ready"] and self.runner is not None
+        agy["install"] = self.agy_installer.status()
         return {"state": self.state, "message": self.message, "baseUrl": self.listener.base_url,
-                "authenticated": bool(self.credentials) or self.m365_ready(), "githubAuthenticated": bool(self.credentials),
+                "authenticated": self.any_channel_ready(), "githubAuthenticated": bool(self.credentials),
                 "processId": os.getpid(), "loginState": self.login_state,
                 "username": self.credentials.get("username") if self.credentials else None,
                 "deviceCode": self.device.user_code if self.device else None,
                 "verificationUri": self.device.verification_uri if self.device else None,
                 "logFile": str(self.store.directory / "logs" / "gateway.log"),
                 "logging": {"enabled": LoggingSettings.load(self.store.root).enabled, "active": self.log_manager.enabled},
-                "m365": m365}
+                "m365": m365,
+                "antigravity": agy}
 
     async def set_logging(self, enabled: bool) -> dict:
         if type(enabled) is not bool:
@@ -163,12 +195,43 @@ class Runtime:
             log.info("M365 synchronization settings saved: enabled=%s control_port=%d", settings.enabled, settings.control_port)
             return self.m365_settings()
 
+    def agy_settings_dict(self) -> dict:
+        settings = self.agy_settings()
+        return {"enabled": settings.enabled, "binaryPath": settings.binary_path, "profileMode": settings.profile_mode}
+
+    async def set_agy_settings(self, changes: dict) -> dict:
+        if not isinstance(changes, dict) or not changes or set(changes) - {"enabled", "binaryPath", "profileMode"}:
+            raise ValueError("Antigravity settings accept only enabled, binaryPath and profileMode.")
+        async with self.lifecycle:
+            document = read_project_config(self.store.root)
+            document["antigravity"] = {**document.get("antigravity", {}), **changes}
+            settings = AntigravitySettings.from_data(document)
+            atomic_write(self.store.root / "adapter-config.json", (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+            self.agy_catalog = None
+            log.info("Antigravity settings saved: enabled=%s profile_mode=%s", settings.enabled, settings.profile_mode)
+            if not settings.enabled:
+                await self.cancel_channel("antigravity")
+                if self.runner and not self.any_channel_ready():
+                    await self._stop()
+                elif not self.runner:
+                    self.state = "stopped" if self.any_channel_ready() else "signed-out"
+            else:
+                if not self.runner and self.any_channel_ready():
+                    self.state = "stopped"
+                    if self.running_requested:
+                        try:
+                            await self._start()
+                        except Exception as error:
+                            log.warning("Antigravity enabled; service startup failed: %s", safe_error(error))
+            return self.agy_settings_dict()
+
     def invalidate(self):
         self.generation += 1
         self.catalog = None
         self.routes.clear()
         self.client.invalidate()
         self.m365_catalog = None
+        self.agy_catalog = None
 
     async def models(self, refresh: bool = False) -> list[dict]:
         models, errors = [], []
@@ -177,6 +240,8 @@ class Runtime:
             providers.append(("GitHub", self.github_models))
         if self.m365_ready():
             providers.append(("M365", self.m365_models))
+        if self.agy_ready():
+            providers.append(("Antigravity", self.agy_models))
         for name, fetch in providers:
             try:
                 models.extend(await fetch(refresh))
@@ -186,7 +251,7 @@ class Runtime:
         if not models:
             if errors:
                 raise errors[0]
-            raise UpstreamError(503, "Sign in to GitHub or M365 first.")
+            raise UpstreamError(503, "Sign in to GitHub, M365 or Antigravity first.")
         return models
 
     async def github_models(self, refresh: bool = False) -> list[dict]:
@@ -236,6 +301,32 @@ class Runtime:
             self.m365_catalog = None
         auth.last_error = safe_error(error)
 
+    async def agy_models(self, refresh: bool = False) -> list[dict]:
+        async with self.agy_catalog_lock:
+            auth = self.agy_auth()
+            settings = self.agy_settings()
+            if not auth.ready(settings):
+                raise UpstreamError(401, "Antigravity is not enabled or signed in.")
+            key = auth.generation, self.generation, settings
+            if (not refresh and self.agy_catalog is not None and key == self.agy_catalog_key
+                    and time.monotonic() - self.agy_catalog_at < 300):
+                return deepcopy(self.agy_catalog)
+            try:
+                models = await self.agy_client.models(settings, self.network.settings)
+            except UpstreamError as error:
+                if error.status == 401:
+                    auth.mark_error(safe_error(error), clear_auth=True)
+                    self.agy_catalog = None
+                else:
+                    auth.mark_error(safe_error(error))
+                raise
+            if key != (auth.generation, self.generation, self.agy_settings()):
+                raise UpstreamError(503, "Antigravity settings or network changed while refreshing models; retry.")
+            self.agy_catalog, self.agy_catalog_key = models, key
+            self.agy_catalog_at = time.monotonic()
+            log.info("Antigravity model catalog refreshed: models=%d", len(models))
+            return deepcopy(models)
+
     async def cancel_channel(self, channel: str):
         current = asyncio.current_task()
         pending = [task for task, value in self.active_channels.items() if value == channel and task is not current]
@@ -259,7 +350,7 @@ class Runtime:
         if self.runner:
             await self.runner.cleanup()
             self.runner = None
-        self.state = "stopped" if self.credentials or self.m365_ready() else "signed-out"
+        self.state = "stopped" if self.any_channel_ready() else "signed-out"
 
     async def _cancel_login(self):
         if self.login_task and not self.login_task.done():
@@ -267,6 +358,19 @@ class Runtime:
             with suppress(asyncio.CancelledError):
                 await self.login_task
             self.login_state = "failed"
+
+    async def _cancel_agy_login(self):
+        if self.agy_login_task and not self.agy_login_task.done():
+            self.agy_login_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.agy_login_task
+            self.agy_auth().login_state = "failed"
+
+    async def _cancel_agy_install(self):
+        if self.agy_install_task and not self.agy_install_task.done():
+            self.agy_install_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.agy_install_task
 
     async def start(self):
         async with self.lifecycle:
@@ -289,7 +393,7 @@ class Runtime:
         if settings != self.listener:
             self.listener = settings
             self.invalidate()
-        if not self.credentials and not self.m365_ready():
+        if not self.any_channel_ready():
             self.state = "signed-out"
             return self.status()
         self.state, self.message = "starting", ""
@@ -374,7 +478,77 @@ class Runtime:
         async with self.lifecycle:
             self.running_requested = False
             await self._cancel_login()
+            await self._cancel_agy_login()
+            await self._cancel_agy_install()
             await self._stop()
+            return self.status()
+
+    async def begin_agy_install(self):
+        async with self.lifecycle:
+            if self.shutdown.is_set():
+                raise RuntimeError("Service is shutting down.")
+            if self.agy_install_task and not self.agy_install_task.done():
+                return self.status()
+            self.agy_install_task = asyncio.create_task(self._finish_agy_install())
+            return self.status()
+
+    async def _finish_agy_install(self):
+        try:
+            await self.agy_installer.install(self.network)
+            self.agy_catalog = None
+        except (Exception, asyncio.CancelledError) as error:
+            if not isinstance(error, asyncio.CancelledError):
+                log.warning("Antigravity CLI installation failed: %s", safe_error(error))
+
+    async def begin_agy_login(self):
+        async with self.lifecycle:
+            if self.shutdown.is_set():
+                raise RuntimeError("Service is shutting down.")
+            await self._cancel_agy_login()
+            auth = self.agy_auth()
+            auth.login_state = "pending"
+            auth.last_error = ""
+            self.agy_login_task = asyncio.create_task(self._finish_agy_login())
+            return self.status()
+
+    async def _finish_agy_login(self):
+        auth = self.agy_auth()
+        try:
+            settings = self.agy_settings()
+            result = await auth.authenticate(settings, self.network.settings)
+            if not settings.enabled:
+                document = read_project_config(self.store.root)
+                document["antigravity"] = {**document.get("antigravity", {}), "enabled": True}
+                atomic_write(self.store.root / "adapter-config.json", (json.dumps(document, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+            self.agy_catalog = result.get("models") or None
+            if self.agy_catalog:
+                self.agy_catalog_key = (auth.generation, self.generation, self.agy_settings())
+                self.agy_catalog_at = time.monotonic()
+            auth.login_state = "complete"
+            if not self.runner:
+                self.state = "stopped"
+                if self.running_requested:
+                    try:
+                        await self._start()
+                    except Exception as error:
+                        log.warning("Antigravity login completed; service startup failed: %s", safe_error(error))
+        except (Exception, asyncio.CancelledError) as error:
+            auth.login_state = "failed"
+            auth.last_error = safe_error(error)
+
+    async def agy_logout(self):
+        async with self.lifecycle:
+            await self._cancel_agy_login()
+            keep_running = self.runner is not None and (bool(self.credentials) or self.m365_ready())
+            if keep_running:
+                await self.cancel_channel("antigravity")
+                self.agy_catalog = None
+            else:
+                await self._stop()
+            self.agy_auth().clear()
+            log.info("Antigravity authorization removed.")
+            self.agy_catalog = None
+            self.state = "running" if keep_running else "stopped" if self.any_channel_ready() else "signed-out"
             return self.status()
 
     async def begin_login(self):
@@ -382,7 +556,7 @@ class Runtime:
             if self.shutdown.is_set():
                 raise RuntimeError("Service is shutting down.")
             await self._cancel_login()
-            if self.runner and self.m365_ready():
+            if self.runner and (self.m365_ready() or self.agy_ready()):
                 await self.cancel_channel("github")
                 await self.network.replace(self.network.settings)
                 self.catalog = None
@@ -412,7 +586,7 @@ class Runtime:
             self.state, self.login_state = "running" if self.runner else "stopped", "complete"
         except (Exception, asyncio.CancelledError) as error:
             self.login_state = "failed"
-            self.state = "running" if self.runner else "stopped" if self.credentials or self.m365_ready() else "signed-out"
+            self.state = "running" if self.runner else "stopped" if self.any_channel_ready() else "signed-out"
             self.message = safe_error(error)
 
     async def _load_username(self, token: str) -> str | None:
@@ -426,7 +600,7 @@ class Runtime:
     async def logout(self):
         async with self.lifecycle:
             await self._cancel_login()
-            keep_running = self.runner is not None and self.m365_ready()
+            keep_running = self.runner is not None and (self.m365_ready() or self.agy_ready())
             if keep_running:
                 await self.cancel_channel("github")
                 await self.network.replace(self.network.settings)
@@ -439,7 +613,7 @@ class Runtime:
             self.store.delete("auth")
             log.info("GitHub authorization removed.")
             self.credentials = self.device = None
-            self.state = "running" if keep_running else "stopped" if self.m365_ready() else "signed-out"
+            self.state = "running" if keep_running else "stopped" if self.any_channel_ready() else "signed-out"
             self.login_state, self.message = "idle", ""
             return self.status()
 
@@ -450,6 +624,8 @@ class Runtime:
             document = read_project_config(self.store.root)
             document["proxy"] = asdict(settings)
             await self._cancel_login()
+            await self._cancel_agy_login()
+            await self.cancel_channel("antigravity")
             old = self.network.settings
             await self.network.replace(settings)
             await self.m365_network.replace(settings)
@@ -462,7 +638,7 @@ class Runtime:
             self.invalidate()
             log.info("Upstream proxy changed: type=%s", settings.type)
             self.message = ""
-            if self.credentials or self.m365_ready():
+            if self.any_channel_ready():
                 try:
                     await self.models(True)
                 except Exception as error:
@@ -479,6 +655,9 @@ class Runtime:
             profile = self.m365_auth().profile
             if self.m365_ready() and profile is not None:
                 models = await M365Client(network).models(profile)
+                return {"message": f"Connection and authorization OK; {len(models)} chat models."}
+            if self.agy_ready():
+                models = await self.agy_client.models(self.agy_settings(), settings)
                 return {"message": f"Connection and authorization OK; {len(models)} chat models."}
             await client.json("GET", "https://api.github.com", headers={"user-agent": "Github-Copilot-Proxy"})
             return {"message": "GitHub connection OK. Sign in to verify Copilot access."}
@@ -526,10 +705,32 @@ class Runtime:
                     result = self._m365.disconnect()
                     log.info("M365 authorization removed.")
                     self.m365_catalog = None
-                    if not self.credentials:
+                    if not self.credentials and not self.agy_ready():
                         await self._stop()
                     return result
             return await self._m365.verify(self.network)
+        if command == "agy-status":
+            return self.status()["antigravity"]
+        if command == "agy-settings-get":
+            return self.agy_settings_dict()
+        if command == "agy-settings-set":
+            return await self.set_agy_settings(request.get("settings"))
+        if command == "agy-login":
+            return await self.begin_agy_login()
+        if command == "agy-cancel-login":
+            async with self.lifecycle:
+                await self._cancel_agy_login()
+                return self.status()
+        if command == "agy-logout":
+            return await self.agy_logout()
+        if command == "agy-install":
+            return await self.begin_agy_install()
+        if command == "agy-cancel-install":
+            async with self.lifecycle:
+                await self._cancel_agy_install()
+                return self.status()
+        if command == "agy-install-status":
+            return self.agy_installer.status()
         if command == "status":
             return self.status()
         if command == "start":
@@ -579,10 +780,10 @@ class Runtime:
             payload = await request.json()
             if not isinstance(payload, dict) or not isinstance(payload.get("model"), str):
                 raise ProtocolError("A model id and JSON object are required.")
-            channel = "m365" if payload["model"].startswith("m365/") else "github"
+            channel = "m365" if payload["model"].startswith("m365/") else "antigravity" if payload["model"].startswith("agy/") else "github"
             request[ROUTE_PROVIDER] = channel
             self.active_channels[task] = channel
-            fetch_models = self.m365_models if channel == "m365" else self.github_models
+            fetch_models = self.m365_models if channel == "m365" else self.agy_models if channel == "antigravity" else self.github_models
             model = next((m for m in await fetch_models() if m["id"] == payload["model"]), None)
             if model is None and time.monotonic() - self.forced_at >= 10:
                 self.forced_at = time.monotonic()
@@ -590,6 +791,35 @@ class Runtime:
             if model is None:
                 raise ProtocolError("Model is not in the official Copilot catalog.")
             request[ROUTE_MODEL] = model["id"]
+            if channel == "antigravity":
+                if raw:
+                    raise ProtocolError("Antigravity models support /v1/chat/completions, not /v1/responses.")
+                async with self.agy_rate_lock:
+                    await asyncio.sleep(max(0, self.agy_next_request - time.monotonic()))
+                    self.agy_next_request = time.monotonic() + self.request_interval
+                settings = self.agy_settings()
+                if not self.agy_auth().ready(settings):
+                    raise UpstreamError(401, "Antigravity is not enabled or signed in.")
+                try:
+                    async with aclosing(self.agy_client.chat(settings, self.network.settings, model, payload)) as chunks:
+                        if not payload.get("stream"):
+                            collected = [chunk async for chunk in chunks]
+                            return web.json_response(collect_chat(collected, channel="Antigravity"))
+                        first = await anext(chunks)
+                        stream = web.StreamResponse(headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"})
+                        await stream.prepare(request)
+                        await self.write_event(stream, first)
+                        async for chunk in chunks:
+                            await self.write_event(stream, chunk)
+                        await self.write_event(stream, "[DONE]")
+                        return stream
+                except UpstreamError as error:
+                    if error.status == 401:
+                        self.agy_auth().mark_error(safe_error(error), clear_auth=True)
+                        self.agy_catalog = None
+                    else:
+                        self.agy_auth().mark_error(safe_error(error))
+                    raise
             if channel == "m365":
                 if raw:
                     raise ProtocolError("M365 models support /v1/chat/completions, not /v1/responses.")

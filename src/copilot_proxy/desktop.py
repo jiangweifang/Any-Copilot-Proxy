@@ -11,7 +11,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Qt, QUrl, Si
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame,
                               QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-                              QPushButton, QSpinBox, QSystemTrayIcon, QVBoxLayout, QWidget)
+                              QProgressBar, QPushButton, QSpinBox, QSystemTrayIcon, QVBoxLayout, QWidget)
 
 from .config import InstanceLock, ListenerSettings, UserStore
 from .i18n import TEXT, localize_message, tr
@@ -36,6 +36,8 @@ QLineEdit:focus,QComboBox:focus,QSpinBox:focus { border-color:#a493f5; }
 QMenu { background:#191e2a; border:1px solid #3b465e; }
 QMenu::item { padding:9px 24px; }
 QMenu::item:selected { background:#343054; }
+QProgressBar { background:#111622; border:1px solid #3b465e; border-radius:7px; text-align:center; min-height:18px; color:#e8eaf4; font-size:12px; }
+QProgressBar::chunk { background:#7862de; border-radius:6px; }
 """
 
 
@@ -141,7 +143,7 @@ class ProxyDialog(QDialog):
         self.language = parent.language if isinstance(parent, MainWindow) else store.read("ui", {}).get("language", "zh")
         self.raw_message = ""
         self.message_kind = "plain"
-        self.setWindowTitle("Network settings - Github Copilot Proxy")
+        self.setWindowTitle("Network settings - Copilot Proxy")
         self.resize(530, 500)
         self.dispatch = Dispatcher(store, self)
         self.dispatch.result.connect(self.completed)
@@ -244,7 +246,7 @@ class ProxyDialog(QDialog):
     @Slot(str)
     def retranslate(self, language):
         self.language = language
-        self.setWindowTitle(tr(language, "network") + " - Github Copilot Proxy")
+        self.setWindowTitle(tr(language, "network") + " - Copilot Proxy")
         self.heading.setText(tr(language, "network"))
         self.subtitle.setText(tr(language, "proxy_subtitle"))
         self.kind.setItemText(0, tr(language, "direct"))
@@ -366,7 +368,7 @@ class ListenerDialog(QDialog):
     @Slot(str)
     def retranslate(self, language):
         self.language = language
-        self.setWindowTitle(tr(language, "listener") + " - Github Copilot Proxy")
+        self.setWindowTitle(tr(language, "listener") + " - Copilot Proxy")
         self.heading.setText(tr(language, "listener"))
         self.description.setText(tr(language, "listener_description"))
         self.form_layout.labelForField(self.host).setText(tr(language, "listener_host"))
@@ -465,6 +467,112 @@ class M365Dialog(QDialog):
                              tr(language, "m365_port_saved") if self.saved else "")
 
 
+class AntigravityDialog(QDialog):
+    applied = Signal()
+
+    def __init__(self, store, parent=None):
+        super().__init__(parent)
+        self.language = parent.language if isinstance(parent, MainWindow) else store.read("ui", {}).get("language", "zh")
+        self.busy = False
+        self.loaded = False
+        self.saved = False
+        self.raw_message = ""
+        self.resize(540, 320)
+        self.dispatch = Dispatcher(store, self)
+        self.dispatch.result.connect(self.completed)
+        self.dispatch.error.connect(self.failed)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(28, 25, 28, 25)
+        layout.setSpacing(14)
+        self.description = label("", "muted")
+        layout.addWidget(self.description)
+        self.form = QFormLayout()
+        self.binary_path_label = label()
+        self.binary_path = QLineEdit()
+        self.profile_mode_label = label()
+        self.profile_mode = QComboBox()
+        self.profile_mode.addItem("", "shared")
+        self.profile_mode.addItem("", "isolated")
+        self.form.addRow(self.binary_path_label, self.binary_path)
+        self.form.addRow(self.profile_mode_label, self.profile_mode)
+        layout.addLayout(self.form)
+        self.message = label()
+        layout.addWidget(self.message)
+        buttons = QHBoxLayout()
+        self.save = QPushButton()
+        self.save.setObjectName("primary")
+        self.save.setEnabled(False)
+        self.cancel = QPushButton()
+        buttons.addWidget(self.save)
+        buttons.addWidget(self.cancel)
+        layout.addLayout(buttons)
+        self.save.clicked.connect(self.submit)
+        self.cancel.clicked.connect(self.reject)
+        if isinstance(parent, MainWindow):
+            parent.language_changed.connect(self.retranslate)
+        self.retranslate(self.language)
+        self.dispatch.request("agy-settings-get", {"command": "agy-settings-get"})
+
+    def reject(self):
+        if not self.busy:
+            super().reject()
+
+    def submit(self):
+        if self.busy or not self.loaded:
+            return
+        self.busy = True
+        self.save.setEnabled(False)
+        self.binary_path.setEnabled(False)
+        self.profile_mode.setEnabled(False)
+        self.dispatch.request("agy-settings-set", {
+            "command": "agy-settings-set",
+            "settings": {
+                "binaryPath": self.binary_path.text().strip(),
+                "profileMode": self.profile_mode.currentData(),
+            },
+        })
+
+    @Slot(str, object)
+    def completed(self, command, result):
+        self.binary_path.setText(result.get("binaryPath", ""))
+        index = self.profile_mode.findData(result.get("profileMode", "shared"))
+        if index >= 0:
+            self.profile_mode.setCurrentIndex(index)
+        self.loaded, self.busy = True, False
+        self.saved = command == "agy-settings-set"
+        self.raw_message = ""
+        self.save.setEnabled(True)
+        self.binary_path.setEnabled(True)
+        self.profile_mode.setEnabled(True)
+        self.retranslate(self.language)
+        if self.saved:
+            self.applied.emit()
+
+    @Slot(str, str)
+    def failed(self, command, error):
+        self.busy = False
+        self.raw_message, self.saved = error, False
+        self.save.setEnabled(self.loaded)
+        self.binary_path.setEnabled(True)
+        self.profile_mode.setEnabled(True)
+        self.retranslate(self.language)
+
+    @Slot(str)
+    def retranslate(self, language):
+        self.language = language
+        self.setWindowTitle(tr(language, "agy_settings"))
+        self.description.setText(tr(language, "agy_settings_description"))
+        self.binary_path_label.setText(tr(language, "agy_binary_path"))
+        self.binary_path.setPlaceholderText(tr(language, "agy_binary_placeholder"))
+        self.profile_mode_label.setText(tr(language, "agy_profile_mode"))
+        self.profile_mode.setItemText(0, tr(language, "agy_profile_shared"))
+        self.profile_mode.setItemText(1, tr(language, "agy_profile_isolated"))
+        self.save.setText(tr(language, "save"))
+        self.cancel.setText(tr(language, "cancel"))
+        self.message.setText(localize_message(language, self.raw_message) if self.raw_message else
+                             tr(language, "agy_settings_saved") if self.saved else "")
+
+
 class MainWindow(QMainWindow):
     language_changed = Signal(str)
 
@@ -478,6 +586,7 @@ class MainWindow(QMainWindow):
         self.service_busy = False
         self.startup_busy = False
         self.m365_busy = False
+        self.agy_busy = False
         self.logging_busy = False
         self.startup_enabled = None
         self.desktop_lock = None
@@ -493,7 +602,7 @@ class MainWindow(QMainWindow):
         self.dispatch = Dispatcher(store, self)
         self.dispatch.result.connect(self.completed)
         self.dispatch.error.connect(self.failed)
-        self.setWindowTitle("Github Copilot Proxy")
+        self.setWindowTitle("Copilot Proxy")
         self.setWindowIcon(app_icon())
         self.resize(880, 740)
         self.setMinimumSize(740, 550)
@@ -504,7 +613,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(20)
         header = QHBoxLayout()
         titles = QVBoxLayout()
-        titles.addWidget(label("Github Copilot Proxy", "heading"))
+        titles.addWidget(label("Copilot Proxy", "heading"))
         self.subtitle = label("", "muted")
         titles.addWidget(self.subtitle)
         header.addLayout(titles)
@@ -566,6 +675,48 @@ class MainWindow(QMainWindow):
         layout.addLayout(m365_row)
         self.m365_switch.clicked.connect(self.toggle_m365)
         self.m365_button.clicked.connect(self.show_m365)
+        agy_row = QHBoxLayout()
+        self.agy_switch = QCheckBox()
+        self.agy_switch.setEnabled(False)
+        self.agy_account = label("", "muted")
+        self.agy_install_button = QPushButton()
+        self.agy_install_button.setObjectName("primary")
+        self.agy_cancel_install_button = QPushButton()
+        self.agy_login_button = QPushButton()
+        self.agy_cancel_button = QPushButton()
+        self.agy_logout_button = QPushButton()
+        self.agy_settings_button = QPushButton()
+        self.agy_install_button.hide()
+        self.agy_cancel_install_button.hide()
+        self.agy_login_button.hide()
+        self.agy_cancel_button.hide()
+        self.agy_logout_button.hide()
+        agy_row.addWidget(self.agy_switch)
+        agy_row.addWidget(self.agy_account, 1)
+        agy_row.addWidget(self.agy_install_button)
+        agy_row.addWidget(self.agy_cancel_install_button)
+        agy_row.addWidget(self.agy_login_button)
+        agy_row.addWidget(self.agy_cancel_button)
+        agy_row.addWidget(self.agy_logout_button)
+        agy_row.addWidget(self.agy_settings_button)
+        layout.addLayout(agy_row)
+        agy_progress_row = QHBoxLayout()
+        self.agy_progress_bar = QProgressBar()
+        self.agy_progress_bar.setRange(0, 100)
+        self.agy_progress_bar.setFixedWidth(220)
+        self.agy_progress_label = label("", "muted")
+        self.agy_progress_bar.hide()
+        self.agy_progress_label.hide()
+        agy_progress_row.addWidget(self.agy_progress_bar)
+        agy_progress_row.addWidget(self.agy_progress_label, 1)
+        layout.addLayout(agy_progress_row)
+        self.agy_switch.clicked.connect(self.toggle_agy)
+        self.agy_install_button.clicked.connect(lambda: self.request("agy-install"))
+        self.agy_cancel_install_button.clicked.connect(lambda: self.request("agy-cancel-install"))
+        self.agy_login_button.clicked.connect(self.agy_login)
+        self.agy_cancel_button.clicked.connect(lambda: self.request("agy-cancel-login"))
+        self.agy_logout_button.clicked.connect(self.agy_logout)
+        self.agy_settings_button.clicked.connect(self.show_agy)
         self.device_code = QLineEdit()
         self.device_code.setReadOnly(True)
         self.device_code.setPlaceholderText("Your device code will appear here")
@@ -610,7 +761,7 @@ class MainWindow(QMainWindow):
         self.tray_actions = {}
         if not testing and QSystemTrayIcon.isSystemTrayAvailable():
             self.tray = QSystemTrayIcon(self.windowIcon(), self)
-            self.tray.setToolTip("Github Copilot Proxy")
+            self.tray.setToolTip("Copilot Proxy")
             menu = QMenu()
             for key, callback in (("dashboard", self.showNormal), ("network", self.show_proxy), ("listener", self.show_listener), ("quit", self.quit)):
                 action = menu.addAction(tr(self.language, key))
@@ -707,6 +858,24 @@ class MainWindow(QMainWindow):
         self.m365_switch.setEnabled(False)
         self.dispatch.request("m365-settings-set", {"command": "m365-settings-set", "settings": {"enabled": enabled}})
 
+    def show_agy(self):
+        dialog = AntigravityDialog(self.store, self)
+        dialog.setStyleSheet(STYLE)
+        dialog.applied.connect(lambda: self.request("status"))
+        dialog.exec()
+
+    def toggle_agy(self, enabled):
+        self.agy_busy = True
+        self.agy_switch.setEnabled(False)
+        self.dispatch.request("agy-settings-set", {"command": "agy-settings-set", "settings": {"enabled": enabled}})
+
+    def agy_login(self):
+        self.request("agy-login")
+
+    def agy_logout(self):
+        if confirm(self, self.language, "agy_logout_title", "agy_logout_body"):
+            self.request("agy-logout")
+
     def toggle_logging(self, enabled):
         self.logging_busy = True
         self.logging_switch.setEnabled(False)
@@ -726,6 +895,11 @@ class MainWindow(QMainWindow):
         if command == "m365-settings-set":
             self.m365_busy = False
             self.m365_switch.setChecked(result["enabled"])
+            self.request("status")
+            return
+        if command == "agy-settings-set":
+            self.agy_busy = False
+            self.agy_switch.setChecked(result["enabled"])
             self.request("status")
             return
         if command in ("startup-status", "startup", "startup-enable", "startup-disable"):
@@ -781,6 +955,9 @@ class MainWindow(QMainWindow):
         if command == "m365-settings-set":
             self.m365_busy = False
             self.render_m365_controls()
+        if command == "agy-settings-set":
+            self.agy_busy = False
+            self.render_agy_controls()
         if command == "logging-set":
             self.logging_busy = False
             self.render_logging_controls()
@@ -883,6 +1060,7 @@ class MainWindow(QMainWindow):
         self.render_service_controls()
         self.render_startup_controls()
         self.render_m365_controls()
+        self.render_agy_controls()
         self.render_logging_controls()
 
     def render_logging_controls(self):
@@ -898,6 +1076,99 @@ class MainWindow(QMainWindow):
         if settings is not None and not self.m365_busy:
             self.m365_switch.setChecked(settings["syncEnabled"])
         self.m365_account.setText(settings.get("username") or tr(self.language, "signed-out") if settings else "")
+
+    def render_agy_controls(self):
+        info = (self.last_status or {}).get("antigravity")
+        connected = self.manager_connected and info is not None
+        self.agy_switch.setEnabled(connected and not self.agy_busy)
+        self.agy_settings_button.setEnabled(self.manager_connected and not self.agy_busy)
+        if not connected:
+            for widget in (self.agy_install_button, self.agy_cancel_install_button,
+                           self.agy_login_button, self.agy_cancel_button, self.agy_logout_button,
+                           self.agy_progress_bar, self.agy_progress_label):
+                widget.hide()
+            self.agy_account.setText("")
+            return
+        if not self.agy_busy:
+            self.agy_switch.setChecked(info["enabled"])
+        install = info.get("install") or {}
+        install_state = install.get("state", "idle")
+        installing = install_state == "running"
+        pending = info.get("loginState") == "pending"
+        authed = bool(info.get("authenticated"))
+        found = bool(info.get("binaryFound"))
+
+        if self.timer.isActive():
+            desired = 250 if installing else 1500
+            if self.timer.interval() != desired:
+                self.timer.setInterval(desired)
+
+        self.agy_install_button.setVisible(not found and not installing)
+        self.agy_install_button.setEnabled(not installing and not self.agy_busy)
+        self.agy_cancel_install_button.setVisible(installing)
+        self.agy_cancel_install_button.setEnabled(installing)
+        self.agy_login_button.setVisible(found and not authed and not pending and not installing)
+        self.agy_login_button.setEnabled(found and not self.agy_busy and not installing)
+        self.agy_cancel_button.setVisible(pending and not installing)
+        self.agy_cancel_button.setEnabled(pending)
+        self.agy_logout_button.setVisible(authed and not pending and not installing)
+        self.agy_logout_button.setEnabled(authed and not self.agy_busy)
+
+        if installing:
+            text = self._format_agy_install_text(install)
+            stage = install.get("stage", "manifest")
+            if stage in ("manifest", "configuring") or (stage == "downloading" and not install.get("totalBytes")):
+                self.agy_progress_bar.setRange(0, 0)
+            else:
+                self.agy_progress_bar.setRange(0, 100)
+                self.agy_progress_bar.setValue(int(install.get("percent", 0)))
+            self.agy_progress_bar.show()
+            self.agy_progress_label.setText(text)
+            self.agy_progress_label.show()
+            self.agy_account.setText(tr(self.language, "working"))
+            return
+
+        if install_state in ("complete", "failed", "cancelled"):
+            self.agy_progress_bar.setRange(0, 100)
+            self.agy_progress_bar.setValue(100 if install_state == "complete" else int(install.get("percent", 0)))
+            self.agy_progress_bar.setVisible(install_state == "complete")
+            self.agy_progress_label.setText(self._format_agy_install_text(install))
+            self.agy_progress_label.show()
+        else:
+            self.agy_progress_bar.hide()
+            self.agy_progress_label.hide()
+
+        if pending:
+            text = tr(self.language, "agy_signing_in")
+        elif not found:
+            text = tr(self.language, "agy_not_installed")
+        elif authed:
+            account = info.get("account")
+            text = tr(self.language, "signed_in_as", username=account) if account else tr(self.language, "login_success")
+        else:
+            text = tr(self.language, "signed-out")
+        self.agy_account.setText(text)
+
+    def _format_agy_install_text(self, install: dict) -> str:
+        stage = install.get("stage", "idle")
+        version = install.get("version") or ""
+        if version and not version.startswith("v"):
+            version = f"v{version}"
+        if stage == "downloading":
+            downloaded = f"{install.get('downloadedBytes', 0) / 1048576:.1f}"
+            total_bytes = install.get("totalBytes", 0)
+            if total_bytes > 0:
+                total = f"{total_bytes / 1048576:.1f}"
+                return tr(self.language, "agy_stage_downloading", version=version, downloaded=downloaded, total=total, percent=int(install.get("percent", 0)))
+            return tr(self.language, "agy_stage_downloading_unknown", version=version, downloaded=downloaded)
+        if stage == "failed":
+            return tr(self.language, "agy_stage_failed", error=localize_message(self.language, install.get("error", "")))
+        if stage == "complete":
+            return tr(self.language, "agy_stage_complete", version=version)
+        key = f"agy_stage_{stage}"
+        if key in TEXT[self.language]:
+            return tr(self.language, key)
+        return tr(self.language, "working")
 
     def render_service_controls(self):
         state = self.badge_code
@@ -950,6 +1221,14 @@ class MainWindow(QMainWindow):
         self.m365_switch.setText(tr(self.language, "m365_sync"))
         self.m365_switch.setToolTip(tr(self.language, "m365_sync_hint"))
         self.m365_button.setText(tr(self.language, "m365_settings"))
+        self.agy_switch.setText(tr(self.language, "agy_enable"))
+        self.agy_switch.setToolTip(tr(self.language, "agy_enable_hint"))
+        self.agy_install_button.setText(tr(self.language, "agy_install"))
+        self.agy_cancel_install_button.setText(tr(self.language, "agy_cancel_install"))
+        self.agy_login_button.setText(tr(self.language, "agy_login"))
+        self.agy_cancel_button.setText(tr(self.language, "agy_cancel_login"))
+        self.agy_logout_button.setText(tr(self.language, "agy_logout"))
+        self.agy_settings_button.setText(tr(self.language, "agy_settings"))
         self.logging_switch.setText(tr(self.language, "runtime_logs"))
         self.logging_switch.setToolTip(tr(self.language, "runtime_logs_hint"))
         self.logs_button.setText(tr(self.language, "open_logs"))
@@ -973,7 +1252,7 @@ def main():
     if not lock.acquire():
         return 0
     app = QApplication(sys.argv[:1])
-    app.setApplicationName("Github Copilot Proxy")
+    app.setApplicationName("Copilot Proxy")
     app.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
     app.setStyleSheet(STYLE)
     try:
@@ -989,7 +1268,7 @@ def main():
                 asyncio.run(serve(store))
             except Exception as error:
                 errors.append(safe_error(error))
-        thread = threading.Thread(target=run, daemon=True, name="Github Copilot Proxy")
+        thread = threading.Thread(target=run, daemon=True, name="Copilot Proxy")
         thread.start()
     window = MainWindow(store, owns)
     window.desktop_lock = lock

@@ -3,9 +3,9 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "github-copilot-proxy"
+name = "copilot-proxy"
 version = "0.1.0"
-description = "Local Copilot gateway with a cross-platform desktop and headless CLI"
+description = "Local multi-channel AI gateway (GitHub Copilot, M365 Copilot, Google Antigravity) with desktop UI and headless CLI"
 requires-python = ">=3.11"
 dependencies = ["aiohttp>=3.14,<4", "aiohttp-socks>=0.10,<1", "jsonschema>=4.25,<5"]
 

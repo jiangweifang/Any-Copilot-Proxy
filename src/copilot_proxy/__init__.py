@@ -1,1 +1,1 @@
-"""GitHub Copilot Proxy."""
+"""Copilot Proxy."""

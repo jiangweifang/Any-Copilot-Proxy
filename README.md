@@ -1,8 +1,8 @@
-# Github Copilot Proxy
+# Copilot Proxy
 
-使用 **Python** 实现的 GitHub Copilot / Microsoft 365 Copilot 本地网关，提供 OpenAI Chat Completions 兼容接口。两个渠道并存，GitHub 保留原模型 ID，M365 使用 `m365/` 前缀。桌面界面使用 **PySide6 / Qt**，支持 Windows、macOS 和 Linux；GitHub 渠道的 Linux 服务器可只安装 CLI，不需要桌面、Node.js 或 .NET。
+使用 **Python** 实现的 **GitHub Copilot / Microsoft 365 Copilot / Google Antigravity** 本地多渠道模型网关，提供 OpenAI Chat Completions 兼容接口。三个渠道并存共用同一本地端口：GitHub 保留原模型 ID，M365 使用 `m365/` 前缀，Antigravity 使用 `agy/` 前缀。桌面界面使用 **PySide6 / Qt**，支持 Windows、macOS 和 Linux；无界面 Linux 服务器可只安装 CLI，不需要桌面、Node.js 或 .NET。
 
-> 非 GitHub 或 Microsoft 官方项目。需要自己的有效 Copilot 授权，并遵守服务提供方、模型供应商及组织的使用政策。代理连通不代表可以使用任何地区或账号未获授权的模型。
+> 非 GitHub、Microsoft 或 Google 官方项目。需要你自己的有效订阅与授权，并遵守各服务提供方、模型供应商及组织的使用政策。代理连通不代表可以使用任何地区或账号未获授权的模型。
 
 ## 快速开始
 
@@ -70,7 +70,7 @@ $env:PIP_INDEX_URL = 'https://packagefeedproxy.microsoft.io/pypi/simple/'
 - **监听设置 / Listener settings**：修改 `host` 和主端口 `port`，保存到 `adapter-config.json`。保存前确认；服务运行时重新监听并中断当前请求，不重启程序进程，失败则恢复旧配置和监听。停止状态只保存，不自动启动。兼容端口 `bridgePort` 和其他字段保持不变。
 - **Test connection**：不保存设置，不消耗模型推理额度；未登录时测 GitHub 连通，登录后测 Copilot 权限和模型目录。
 - **Save and apply**：立即切换上游连接，不重启进程；正在进行的请求可能中断，会明确返回失败，不自动重发聊天。
-- **托盘**：支持的桌面环境中显示 Github Copilot Proxy，可打开主窗口、设置代理或退出。部分 Linux 桌面需要 AppIndicator/StatusNotifier 支持；无托盘时仍可使用主窗口。
+- **托盘**：支持的桌面环境中显示 Copilot Proxy，可打开主窗口、设置代理或退出。部分 Linux 桌面需要 AppIndicator/StatusNotifier 支持；无托盘时仍可使用主窗口。
 
 监听与代理统一保存在根目录的 **`adapter-config.json`**；`examples` 中的文件仅供参考，应用不会自动读取。代理密码按用户选择明文保存，输入框掩码显示，状态与日志不回显；配置中填写真实密码后不要提交到 Git 或复制进镜像。
 
@@ -236,14 +236,14 @@ M365 参数边界：
 - BizChat 不暴露原生采样器与 token 输出限制。`max_tokens`、`max_completion_tokens`、`temperature`、`top_p` 等仅作为提示传给模型，不是严格控制；会在日志与响应 `warnings` 中说明。不要依赖它们做精确长度、费用或结构化输出约束。
 - 不返回编造的 token 用量或独立推理内容；WorkBuddy 示例关闭 `supportsReasoning`。
 
-### 双渠道并存与示例配置
+### 多渠道并存与示例配置
 
-不增加 GitHub / M365 渠道切换按钮。两个渠道共用 `http://127.0.0.1:4140/v1`，GitHub 保留原模型 ID，M365 使用 `m365/<上游模型ID>`，按请求里的 `model` 区分来源，避免重名。M365 同步开关不是渠道选择器。
+不增加渠道切换按钮。GitHub、M365 与 Antigravity 三个渠道共用 `http://127.0.0.1:4140/v1`，GitHub 保留原模型 ID，M365 使用 `m365/<上游模型ID>`，Antigravity 使用 `agy/<上游模型ID>`，按请求里的 `model` 区分来源，避免重名。
 
-- [VS Code 配置示例](examples/vscode-chatLanguageModels.json)：供应商数组，`vendor: customendpoint`，每个模型使用完整 Chat Completions URL。合并到 `%APPDATA%\Code\User\chatLanguageModels.json`，不要覆盖其他供应商。
-- [WorkBuddy 配置示例](examples/workbuddy-models.json)：模型数组，使用 `supportsToolCall`、`supportsImages` 等 WorkBuddy 字段。合并到 `%USERPROFILE%\.workbuddy\models.json`，保留已有 GitHub / 其他渠道。
+- [VS Code 配置示例](examples/vscode-chatLanguageModels.json)：供应商数组，`vendor: customendpoint`，包含 `M365 Copilot` 与 `Google Antigravity` 两个供应商组，每个模型使用完整 Chat Completions URL。合并到 `%APPDATA%\Code\User\chatLanguageModels.json`，不要覆盖其他供应商。
+- [WorkBuddy 配置示例](examples/workbuddy-models.json)：模型数组，包含 `m365/` 与 `agy/` 常用模型示例（Antigravity 模型已开启 `supportsReasoning: true`）。合并到 `%USERPROFILE%\.workbuddy\models.json`，保留已有 GitHub / 其他渠道。
 
-两个示例仅包含 M365 增量配置，使用已查询到的账号模型 ID；其他账号请先查询 `/v1/models`，不能假设目录完全相同。`maxInputTokens: 128000` / `maxOutputTokens: 16000` 对齐参考项目的默认客户端预算，**不是已经测得或官方保证的上下文上限**。API Key 为 `unused`，不要把浏览器令牌或其他服务的密钥填入示例。GitHub 原配置可继续保留；若也通过本项目代理 GitHub，则使用同一地址和目录中不带 `m365/` 的 ID。
+示例中使用的是实测查询到的常用模型 ID；不同订阅等级的可用列表可能不同，完整目录请直接访问 `http://127.0.0.1:4140/v1/models` 查看。`maxInputTokens: 128000` / `maxOutputTokens: 16000` 为默认客户端预算，**不是已经测得或官方保证的上下文上限**。API Key 为 `unused`，不要把浏览器令牌或其他服务的密钥填入示例。GitHub 原配置可继续保留；若也通过本项目代理 GitHub，则使用同一地址和目录中不带前缀的 ID。
 
 开始测试时先选择 **M365 · 快速响应**，分别验证简单聊天、流式输出、工具调用后回传、图片理解。订阅模型可能有独立额度或租户限制，目录可见不保证所有模型已向账号开放。修改客户端配置后刷新模型列表或重新打开客户端。
 
@@ -277,7 +277,14 @@ python -m copilot_proxy.m365_copilot.benchmark --root <项目目录> --model m36
 
 - `src/copilot_proxy/github_copilot/`：GitHub 设备授权、模型目录及上游客户端。
 - `src/copilot_proxy/m365_copilot/`：M365 授权、BizChat 客户端、协议适配、Native Messaging 与授权管理入口。
-- `network.py`、`runtime.py`、`config.py`、`desktop.py`：公共网络、路由与生命周期、配置和桌面界面。公共网络层不包含具体渠道授权逻辑。
+- `src/copilot_proxy/antigravity/`：Antigravity（`agy/`）官方 `agy acp` 子进程协议桥接、`oauth-personal` 授权管理与聊天客户端。
+- `chat_bridge.py`、`network.py`、`runtime.py`、`config.py`、`desktop.py`：公共文本工具协议、网络、路由与生命周期、配置和桌面界面。公共网络层不包含具体渠道授权逻辑。
+
+### Antigravity (`agy/`) 渠道
+
+- 通过官方 `agy` CLI 的无头 ACP 模式（`agy acp`，JSON-RPC 2.0 over `stdio`）与 `oauth-personal` Google OAuth 登录接入，直接使用个人 Google / Gemini 订阅额度，模型目录统一带 `agy/` 前缀，与 GitHub、M365 三渠道共用 `http://127.0.0.1:4140/v1`。
+- 网关模式仅提供对话推理：每次会话使用空临时目录作为 `cwd`，并自动拒绝来自 `agy` 的内置文件/终端权限请求（`session/request_permission`）；外部客户端传入的 `tools` 参数通过与 M365 相同的受校验 `<tool_call>` 文本协议转换为 OpenAI `tool_calls` 由客户端自行执行。
+- 支持桌面端「安装 agy CLI（实时下载与安装进度条）/ 启用 Antigravity 渠道 / 登录 Antigravity / Antigravity 设置」，以及 CLI 命令：`agy-install`、`agy-login`、`agy-logout`、`agy-status`。下载与调用均自动沿用已配置的上游 HTTP / SOCKS5 代理。
 
 ```text
 python -m pip install -c constraints.txt -e ".[desktop]"
@@ -303,7 +310,7 @@ python -m unittest discover -s tests -v
 | 找不到 Python | 激活 Python 3.11+ 的 Conda 环境，或为安装脚本指定解释器绝对路径 |
 | 端口已占用 / 旧 Node 控制记录存在 | 先退出旧版本，勿并行启动两个版本 |
 | 无法访问模型目录 | 查看 Dashboard 状态，完成登录并测试代理 |
-| 显示“状态未知”/无法连接 Github Copilot Proxy | 这不代表业务接口已停止；界面会重试连接，成功后清除旧的连接错误提示。仅识别到旧版控制记录时才提示旧 Node 版本。 |
+| 显示“状态未知”/无法连接 Copilot Proxy | 这不代表业务接口已停止；界面会重试连接，成功后清除旧的连接错误提示。仅识别到旧版控制记录时才提示旧 Node 版本。 |
 | `401` / `403` | 检查账号、订阅和组织授权；代理不能改变服务权限 |
 | 无托盘图标 | 展开隐藏图标，或检查 Linux AppIndicator 支持；主窗口仍可使用 |
 | 模型仅支持 Responses | 通常按目录声明自动选择；必要时使用 `models` 路由覆盖 |
