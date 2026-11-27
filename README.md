@@ -41,10 +41,10 @@ Windows 向导依次检查手动指定的解释器、已激活的 Conda 环境�
 
 桌面默认中文，右上角可在 **简体中文 / English** 之间切换，选择会自动保存。安装完成后，点击 **完成设置 / 启用登录自启动**：本人完成 GitHub 设备授权，然后注册当前用户登录自启动并启动接口。需要代理时先打开 **代理设置**。无界面模式会在终端显示授权地址与设备码，可在另一台有浏览器的设备完成授权。
 
-依赖版本由 `constraints.txt` 固定。公司网络需要镜像时，请在安装前配置 `PIP_INDEX_URL`，不要提交带凭据的源地址。例如当前环境可使用：
+依赖版本由 `constraints.txt` 固定。公司网络需要镜像时，请在安装前配置 `PIP_INDEX_URL`，不要提交带凭据的源地址。例如：
 
 ```powershell
-$env:PIP_INDEX_URL = 'https://packagefeedproxy.microsoft.io/pypi/simple/'
+$env:PIP_INDEX_URL = 'https://pypi.example.com/simple/'
 ```
 
 **从旧 Node 版本升级：先退出旧托盘和服务。** 新版不会同时启动另一套占用相同端口的服务，也不会为了迁移强杀未知进程。原安装目录内的本工具用户设置保持隔离，不读取其他 Copilot 工具共享的登录缓存。
