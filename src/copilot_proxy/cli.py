@@ -38,7 +38,7 @@ async def run_server(store: UserStore):
 
 
 def parser() -> argparse.ArgumentParser:
-    result = argparse.ArgumentParser(description="Copilot Proxy: desktop and headless multi-channel AI gateway")
+    result = argparse.ArgumentParser(description="Any-Copilot-Proxy: desktop and headless multi-channel AI gateway")
     result.add_argument("command", nargs="?", default="status", choices=("serve", "login", "logout", "status", "start", "stop", "shutdown", "models",
                                                                       "proxy-get", "proxy-set", "proxy-test", "install", "uninstall",
                                                                       "agy-login", "agy-logout", "agy-status", "agy-install"))
@@ -181,7 +181,7 @@ async def dispatch(command: str, store: UserStore, request: dict):
     try:
         if command in ("login", "install"):
             if remote:
-                raise RuntimeError("Stop Copilot Proxy before installing again.")
+                raise RuntimeError("Stop Any-Copilot-Proxy before installing again.")
             await login_local(runtime)
             if command == "install":
                 print(await asyncio.to_thread(install_startup, store, False))

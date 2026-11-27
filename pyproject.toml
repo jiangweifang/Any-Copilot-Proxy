@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "copilot-proxy"
+name = "any-copilot-proxy"
 version = "0.1.0"
 description = "Local multi-channel AI gateway (GitHub Copilot, M365 Copilot, Google Antigravity) with desktop UI and headless CLI"
 requires-python = ">=3.11"

@@ -15,7 +15,7 @@ from .installer import default_binary_path
 
 log = logging.getLogger(__name__)
 
-CLIENT_INFO = {"name": "copilot-proxy", "version": "0.1.0"}
+CLIENT_INFO = {"name": "any-copilot-proxy", "version": "0.1.0"}
 DEFAULT_AUTH_METHOD = "oauth-personal"
 
 

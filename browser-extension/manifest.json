@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Copilot Proxy · M365 授权",
+  "name": "Any-Copilot-Proxy · M365 授权",
   "version": "0.1.0",
   "description": "将当前浏览器中的 M365 Copilot 授权同步到本地网关，无需配对码。",
   "permissions": ["nativeMessaging", "webRequest", "storage", "alarms", "scripting"],

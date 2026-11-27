@@ -27,7 +27,7 @@ from .protocol import ProtocolError, ResponseStream, read_events, to_chat, to_re
 
 log = logging.getLogger(__name__)
 
-CONTROL_UNAVAILABLE = "Cannot connect to Copilot Proxy. The service state is unknown."
+CONTROL_UNAVAILABLE = "Cannot connect to Any-Copilot-Proxy. The service state is unknown."
 CONTROL_LEGACY = "Control data belongs to the legacy Node version. Confirm that version has exited before restarting."
 CONTROL_INVALID = "Service control data is invalid or incompatible. Check this installation's data directory."
 CONTROL_CONNECTION_ERRORS = (CONTROL_UNAVAILABLE, CONTROL_LEGACY, CONTROL_INVALID)
@@ -659,7 +659,7 @@ class Runtime:
             if self.agy_ready():
                 models = await self.agy_client.models(self.agy_settings(), settings)
                 return {"message": f"Connection and authorization OK; {len(models)} chat models."}
-            await client.json("GET", "https://api.github.com", headers={"user-agent": "Github-Copilot-Proxy"})
+            await client.json("GET", "https://api.github.com", headers={"user-agent": "Any-Copilot-Proxy"})
             return {"message": "GitHub connection OK. Sign in to verify Copilot access."}
         finally:
             await network.close()

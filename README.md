@@ -1,4 +1,4 @@
-# Copilot Proxy
+# Any-Copilot-Proxy
 
 使用 **Python** 实现的 **GitHub Copilot / Microsoft 365 Copilot / Google Antigravity** 本地多渠道模型网关，提供 OpenAI Chat Completions 兼容接口。三个渠道并存共用同一本地端口：GitHub 保留原模型 ID，M365 使用 `m365/` 前缀，Antigravity 使用 `agy/` 前缀。桌面界面使用 **PySide6 / Qt**，支持 Windows、macOS 和 Linux；无界面 Linux 服务器可只安装 CLI，不需要桌面、Node.js 或 .NET。
 
@@ -11,7 +11,7 @@
 复制这一句话：
 
 ```text
-请按 README 帮我安装并启动 https://github.com/jiangweifang/Github-Copilot-Proxy，先确认是桌面还是无界面服务器，需要 GitHub 浏览器授权时提醒我，完成后验证服务并告诉我访问地址。
+请按 README 帮我安装并启动 https://github.com/jiangweifang/Any-Copilot-Proxy，先确认是桌面还是无界面服务器，需要浏览器授权时提醒我，完成后验证服务并告诉我访问地址。
 ```
 
 ### 2. 或者执行安装向导
@@ -21,7 +21,7 @@
 先克隆（已有仓库则跳过）：
 
 ```text
-git clone https://github.com/jiangweifang/Github-Copilot-Proxy.git
+git clone https://github.com/jiangweifang/Any-Copilot-Proxy.git
 ```
 
 进入项目目录：
@@ -70,7 +70,7 @@ $env:PIP_INDEX_URL = 'https://pypi.example.com/simple/'
 - **监听设置 / Listener settings**：修改 `host` 和主端口 `port`，保存到 `adapter-config.json`。保存前确认；服务运行时重新监听并中断当前请求，不重启程序进程，失败则恢复旧配置和监听。停止状态只保存，不自动启动。兼容端口 `bridgePort` 和其他字段保持不变。
 - **Test connection**：不保存设置，不消耗模型推理额度；未登录时测 GitHub 连通，登录后测 Copilot 权限和模型目录。
 - **Save and apply**：立即切换上游连接，不重启进程；正在进行的请求可能中断，会明确返回失败，不自动重发聊天。
-- **托盘**：支持的桌面环境中显示 Copilot Proxy，可打开主窗口、设置代理或退出。部分 Linux 桌面需要 AppIndicator/StatusNotifier 支持；无托盘时仍可使用主窗口。
+- **托盘**：支持的桌面环境中显示 Any-Copilot-Proxy，可打开主窗口、设置代理或退出。部分 Linux 桌面需要 AppIndicator/StatusNotifier 支持；无托盘时仍可使用主窗口。
 
 监听与代理统一保存在根目录的 **`adapter-config.json`**；`examples` 中的文件仅供参考，应用不会自动读取。代理密码按用户选择明文保存，输入框掩码显示，状态与日志不回显；配置中填写真实密码后不要提交到 Git 或复制进镜像。
 
@@ -310,7 +310,7 @@ python -m unittest discover -s tests -v
 | 找不到 Python | 激活 Python 3.11+ 的 Conda 环境，或为安装脚本指定解释器绝对路径 |
 | 端口已占用 / 旧 Node 控制记录存在 | 先退出旧版本，勿并行启动两个版本 |
 | 无法访问模型目录 | 查看 Dashboard 状态，完成登录并测试代理 |
-| 显示“状态未知”/无法连接 Copilot Proxy | 这不代表业务接口已停止；界面会重试连接，成功后清除旧的连接错误提示。仅识别到旧版控制记录时才提示旧 Node 版本。 |
+| 显示“状态未知”/无法连接 Any-Copilot-Proxy | 这不代表业务接口已停止；界面会重试连接，成功后清除旧的连接错误提示。仅识别到旧版控制记录时才提示旧 Node 版本。 |
 | `401` / `403` | 检查账号、订阅和组织授权；代理不能改变服务权限 |
 | 无托盘图标 | 展开隐藏图标，或检查 Linux AppIndicator 支持；主窗口仍可使用 |
 | 模型仅支持 Responses | 通常按目录声明自动选择；必要时使用 `models` 路由覆盖 |

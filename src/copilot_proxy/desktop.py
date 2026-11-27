@@ -143,7 +143,7 @@ class ProxyDialog(QDialog):
         self.language = parent.language if isinstance(parent, MainWindow) else store.read("ui", {}).get("language", "zh")
         self.raw_message = ""
         self.message_kind = "plain"
-        self.setWindowTitle("Network settings - Copilot Proxy")
+        self.setWindowTitle("Network settings - Any-Copilot-Proxy")
         self.resize(530, 500)
         self.dispatch = Dispatcher(store, self)
         self.dispatch.result.connect(self.completed)
@@ -246,7 +246,7 @@ class ProxyDialog(QDialog):
     @Slot(str)
     def retranslate(self, language):
         self.language = language
-        self.setWindowTitle(tr(language, "network") + " - Copilot Proxy")
+        self.setWindowTitle(tr(language, "network") + " - Any-Copilot-Proxy")
         self.heading.setText(tr(language, "network"))
         self.subtitle.setText(tr(language, "proxy_subtitle"))
         self.kind.setItemText(0, tr(language, "direct"))
@@ -368,7 +368,7 @@ class ListenerDialog(QDialog):
     @Slot(str)
     def retranslate(self, language):
         self.language = language
-        self.setWindowTitle(tr(language, "listener") + " - Copilot Proxy")
+        self.setWindowTitle(tr(language, "listener") + " - Any-Copilot-Proxy")
         self.heading.setText(tr(language, "listener"))
         self.description.setText(tr(language, "listener_description"))
         self.form_layout.labelForField(self.host).setText(tr(language, "listener_host"))
@@ -602,7 +602,7 @@ class MainWindow(QMainWindow):
         self.dispatch = Dispatcher(store, self)
         self.dispatch.result.connect(self.completed)
         self.dispatch.error.connect(self.failed)
-        self.setWindowTitle("Copilot Proxy")
+        self.setWindowTitle("Any-Copilot-Proxy")
         self.setWindowIcon(app_icon())
         self.resize(880, 740)
         self.setMinimumSize(740, 550)
@@ -613,7 +613,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(20)
         header = QHBoxLayout()
         titles = QVBoxLayout()
-        titles.addWidget(label("Copilot Proxy", "heading"))
+        titles.addWidget(label("Any-Copilot-Proxy", "heading"))
         self.subtitle = label("", "muted")
         titles.addWidget(self.subtitle)
         header.addLayout(titles)
@@ -761,7 +761,7 @@ class MainWindow(QMainWindow):
         self.tray_actions = {}
         if not testing and QSystemTrayIcon.isSystemTrayAvailable():
             self.tray = QSystemTrayIcon(self.windowIcon(), self)
-            self.tray.setToolTip("Copilot Proxy")
+            self.tray.setToolTip("Any-Copilot-Proxy")
             menu = QMenu()
             for key, callback in (("dashboard", self.showNormal), ("network", self.show_proxy), ("listener", self.show_listener), ("quit", self.quit)):
                 action = menu.addAction(tr(self.language, key))
@@ -1252,7 +1252,7 @@ def main():
     if not lock.acquire():
         return 0
     app = QApplication(sys.argv[:1])
-    app.setApplicationName("Copilot Proxy")
+    app.setApplicationName("Any-Copilot-Proxy")
     app.setFont(QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont))
     app.setStyleSheet(STYLE)
     try:
@@ -1268,7 +1268,7 @@ def main():
                 asyncio.run(serve(store))
             except Exception as error:
                 errors.append(safe_error(error))
-        thread = threading.Thread(target=run, daemon=True, name="Copilot Proxy")
+        thread = threading.Thread(target=run, daemon=True, name="Any-Copilot-Proxy")
         thread.start()
     window = MainWindow(store, owns)
     window.desktop_lock = lock

@@ -1,1 +1,1 @@
-"""Copilot Proxy."""
+"""Any-Copilot-Proxy."""
